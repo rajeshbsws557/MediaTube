@@ -1,0 +1,61 @@
+name: media_tube
+description: "A media browser with video/audio detection and downloading capabilities"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  
+  # Browser
+  flutter_inappwebview: ^6.1.5
+  
+  # YouTube extraction
+  youtube_explode_dart: ^3.0.5
+  
+  # Downloads
+  dio: ^5.7.0
+  
+  # Permissions
+  permission_handler: ^11.3.1
+  
+  # File paths
+  path_provider: ^2.1.5
+  path: ^1.9.1
+  
+  # State management
+  provider: ^6.1.2
+  
+  # UUID for unique IDs
+  uuid: ^4.5.1
+  
+  # Local notifications for download progress
+  flutter_local_notifications: ^18.0.1
+  
+  # Shared preferences for cookies
+  shared_preferences: ^2.3.3
+  # HTTP package for raw requests
+  http: ^1.2.0
+  
+  # FFmpeg for video/audio merging (DASH streams)
+  # Note: Using minimal package variant configured in android/app/build.gradle.kts
+  # to reduce APK size. Full-GPL adds ~30-50MB extra per ABI.
+  ffmpeg_kit_flutter_new: ^4.1.0
+  
+  # Open files with system apps
+  open_filex: ^4.5.0
+  
+  # App update mechanism
+  package_info_plus: ^8.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

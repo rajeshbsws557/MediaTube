@@ -1,0 +1,40 @@
+# Gradle
+.gradle/
+build/
+!gradle-wrapper.jar
+out/
+
+# Maven
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# JBang (downloaded locally)
+jbang-*/
+jbang.zip
+
+# Logs
+*.log
+
+# Downloaded files
+downloads/
+
+# Local configuration (create from .example files)
+config.properties

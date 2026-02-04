@@ -1,0 +1,137 @@
+# MediaTube
+
+<p align="center">
+  <img src="screenshots/icon.png" width="120" alt="MediaTube Logo">
+</p>
+
+A Flutter Android app with browser and media downloading capabilities. Download videos from YouTube and other websites.
+
+## Features
+
+- 🌐 **Built-in Browser** - Navigate to any website using embedded WebView
+- 🎬 **YouTube Support** - Download YouTube videos in various qualities (up to 1080p+)
+- 📥 **Media Detection** - Automatically detects downloadable media from websites
+- 📊 **Download Manager** - Track progress, pause/resume downloads
+- 🔄 **Auto-Update** - Check for app updates automatically
+- 🎵 **Audio Extraction** - Download audio-only streams from videos
+
+## Screenshots
+
+<!-- Add screenshots here -->
+| Browser | Download Options | Downloads |
+|---------|-----------------|-----------|
+| ![Browser](screenshots/browser.png) | ![Options](screenshots/options.png) | ![Downloads](screenshots/downloads.png) |
+
+## Requirements
+
+- Android 6.0 (API 23) or higher
+- Java Backend Server (for YouTube downloads)
+
+## Installation
+
+### Option 1: Download APK
+Download the latest APK from [Releases](https://github.com/YOUR_USERNAME/MediaTube/releases).
+
+### Option 2: Build from Source
+
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/YOUR_USERNAME/MediaTube.git
+   cd MediaTube
+   ```
+
+2. **Configure the app**
+   
+   Edit `lib/config/app_config.dart` with your server URL:
+   ```dart
+   static const String backendBaseUrl = 'http://YOUR_SERVER_IP:5000';
+   ```
+
+3. **Install dependencies**
+   ```bash
+   flutter pub get
+   ```
+
+4. **Run the app**
+   ```bash
+   flutter run
+   ```
+
+5. **Build release APK**
+   ```bash
+   flutter build apk --release
+   ```
+
+## Backend Server
+
+MediaTube requires a Java backend server for YouTube video extraction. See the [MediaTube-Server](https://github.com/YOUR_USERNAME/MediaTube-Server) repository for setup instructions.
+
+## Configuration
+
+All configurable values are in `lib/config/app_config.dart`:
+
+| Setting | Description |
+|---------|-------------|
+| `backendBaseUrl` | URL of your Java backend server |
+| `githubReleasesUrl` | GitHub releases URL for auto-updates |
+
+## Architecture
+
+```
+lib/
+├── config/           # App configuration
+├── models/           # Data models
+├── providers/        # State management (Provider)
+├── screens/          # UI screens
+├── services/         # Business logic
+└── widgets/          # Reusable UI components
+```
+
+## Tech Stack
+
+- **Framework**: Flutter
+- **Language**: Dart
+- **State Management**: Provider
+- **HTTP Client**: Dio
+- **WebView**: flutter_inappwebview
+- **Video Processing**: FFmpeg
+
+## Permissions
+
+| Permission | Purpose |
+|------------|---------|
+| `INTERNET` | Network access |
+| `WRITE_EXTERNAL_STORAGE` | Save downloads |
+| `READ_EXTERNAL_STORAGE` | Access saved files |
+| `REQUEST_INSTALL_PACKAGES` | App updates |
+| `POST_NOTIFICATIONS` | Download notifications |
+
+## Building for Release
+
+```bash
+flutter build apk --release
+```
+
+The APK will be at `build/app/outputs/flutter-apk/app-release.apk`
+
+## Contributing
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## Disclaimer
+
+This app is for personal use only. Respect copyright laws and the terms of service of websites you visit. The developers are not responsible for any misuse of this application.
+
+## Acknowledgments
+
+- [NewPipe Extractor](https://github.com/TeamNewPipe/NewPipeExtractor) - YouTube extraction
+- [flutter_inappwebview](https://github.com/pichillilorenzo/flutter_inappwebview) - WebView implementation
+- [FFmpeg](https://ffmpeg.org/) - Video processing

@@ -254,72 +254,11 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
+  // NOTE: Since HomeScreen is StatelessWidget, the TextEditingController
+  // is intentionally lightweight here. For a StatefulWidget approach with
+  // proper disposal, wrap HomeScreen in a StatefulWidget.
   Widget _buildSearchBar(BuildContext context, bool isDark) {
-    final controller = TextEditingController();
-    
-    return Container(
-      decoration: BoxDecoration(
-        color: isDark ? Colors.white.withAlpha(25) : Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: isDark ? null : [
-          BoxShadow(
-            color: Colors.black.withAlpha(15),
-            blurRadius: 20,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: TextField(
-        controller: controller,
-        decoration: InputDecoration(
-          hintText: 'Search or enter URL...',
-          hintStyle: TextStyle(
-            color: isDark ? Colors.white54 : Colors.grey[500],
-          ),
-          prefixIcon: Icon(
-            Icons.search,
-            color: isDark ? Colors.white54 : Colors.grey[500],
-          ),
-          suffixIcon: IconButton(
-            icon: Icon(
-              Icons.arrow_forward,
-              color: isDark ? Colors.white70 : Colors.grey[700],
-            ),
-            onPressed: () {
-              if (controller.text.isNotEmpty) {
-                String url = controller.text;
-                if (!url.startsWith('http://') && !url.startsWith('https://')) {
-                  if (url.contains('.') && !url.contains(' ')) {
-                    url = 'https://$url';
-                  } else {
-                    url = 'https://www.google.com/search?q=${Uri.encodeComponent(url)}';
-                  }
-                }
-                onNavigate(url);
-              }
-            },
-          ),
-          border: InputBorder.none,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-        ),
-        style: TextStyle(
-          color: isDark ? Colors.white : Colors.black87,
-        ),
-        onSubmitted: (text) {
-          if (text.isNotEmpty) {
-            String url = text;
-            if (!url.startsWith('http://') && !url.startsWith('https://')) {
-              if (url.contains('.') && !url.contains(' ')) {
-                url = 'https://$url';
-              } else {
-                url = 'https://www.google.com/search?q=${Uri.encodeComponent(url)}';
-              }
-            }
-            onNavigate(url);
-          }
-        },
-      ),
-    );
+    return _SearchBarWidget(isDark: isDark, onNavigate: onNavigate);
   }
 
   Widget _buildSection(
@@ -402,8 +341,8 @@ class HomeScreen extends StatelessWidget {
                 ),
                 child: Icon(
                   site.icon,
-                  color: site.color == const Color(0xFFFFFC00) 
-                      ? Colors.black 
+                  color: site.color == const Color(0xFFFFFC00)
+                      ? Colors.black
                       : site.color,
                   size: 28,
                 ),
@@ -478,6 +417,88 @@ class HomeScreen extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Extracted StatefulWidget to properly manage TextEditingController lifecycle
+class _SearchBarWidget extends StatefulWidget {
+  final bool isDark;
+  final Function(String url) onNavigate;
+  const _SearchBarWidget({required this.isDark, required this.onNavigate});
+  @override
+  State<_SearchBarWidget> createState() => _SearchBarWidgetState();
+}
+
+class _SearchBarWidgetState extends State<_SearchBarWidget> {
+  final TextEditingController _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  String _processUrl(String text) {
+    String url = text;
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      if (url.contains('.') && !url.contains(' ')) {
+        url = 'https://$url';
+      } else {
+        url = 'https://www.google.com/search?q=${Uri.encodeComponent(url)}';
+      }
+    }
+    return url;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: widget.isDark ? Colors.white.withAlpha(25) : Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: widget.isDark ? null : [
+          BoxShadow(
+            color: Colors.black.withAlpha(15),
+            blurRadius: 20,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: TextField(
+        controller: _controller,
+        decoration: InputDecoration(
+          hintText: 'Search or enter URL...',
+          hintStyle: TextStyle(
+            color: widget.isDark ? Colors.white54 : Colors.grey[500],
+          ),
+          prefixIcon: Icon(
+            Icons.search,
+            color: widget.isDark ? Colors.white54 : Colors.grey[500],
+          ),
+          suffixIcon: IconButton(
+            icon: Icon(
+              Icons.arrow_forward,
+              color: widget.isDark ? Colors.white70 : Colors.grey[700],
+            ),
+            onPressed: () {
+              if (_controller.text.isNotEmpty) {
+                widget.onNavigate(_processUrl(_controller.text));
+              }
+            },
+          ),
+          border: InputBorder.none,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+        ),
+        style: TextStyle(
+          color: widget.isDark ? Colors.white : Colors.black87,
+        ),
+        onSubmitted: (text) {
+          if (text.isNotEmpty) {
+            widget.onNavigate(_processUrl(text));
+          }
+        },
       ),
     );
   }

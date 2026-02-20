@@ -13,13 +13,32 @@ class AppConfig {
   /// For Android emulator: 'http://10.0.2.2:5000'
   /// For physical device on same network: 'http://YOUR_LOCAL_IP:5000'
   /// For production: 'https://your-server.com'
+  /// Backend server URL (Legacy/Fallback)
   static const String backendBaseUrl = 'http://192.168.1.147:5000';
 
-  /// GitHub repository URL for releases
-  /// Update this with your actual GitHub username
+  /// GitHub repository owner
+  static const String githubRepoOwner = 'rajeshbsws557';
+
+  /// GitHub repository name
+  static const String githubRepoName = 'MediaTube';
+
+  /// GitHub releases URL (derived)
   static const String githubReleasesUrl =
-      'https://github.com/YOUR_USERNAME/MediaTube/releases';
+      'https://github.com/$githubRepoOwner/$githubRepoName/releases';
 
   /// Current app version (should match pubspec.yaml)
   static const String appVersion = '1.0.0';
+
+  // ============================================================
+  // SECURITY CONFIGURATION
+  // ============================================================
+
+  /// Expected package name for anti-clone check
+  static const String expectedPackageName = 'com.rajesh.mediatube';
+
+  /// Expected signing certificate SHA-256 hash
+  /// Run the app once to see the actual hash in logs, then update this value.
+  /// This ensures only the official APK signed by YOU can run.
+  static const String expectedSignatureHash =
+      '57d380b541b2f33ce86d29bb35de14f4f23c536e426e33dad8ad1478d55b55ff'; // Security locked
 }

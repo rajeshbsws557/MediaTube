@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
@@ -8,17 +9,11 @@ import '../models/detected_media.dart';
 /// Optimized with caching and parallel operations
 class YouTubeService {
   YoutubeExplode? _yt;
-  static String? _visitorData;
-  static String? _poToken;
-  static const int _maxRetries = 3; // Allow more retries for network issues
-  
+
   // Cache for manifests and video info to avoid repeated fetches
   final Map<String, _CachedData<StreamManifest>> _manifestCache = {};
   final Map<String, _CachedData<Video>> _videoCache = {};
   static const Duration _cacheDuration = Duration(minutes: 5);
-  
-  // Track last successful fetch time to avoid rapid retries
-  DateTime? _lastFetchTime;
 
   YoutubeExplode get yt {
     _yt ??= YoutubeExplode();
@@ -31,12 +26,6 @@ class YouTubeService {
       _yt?.close();
     } catch (_) {}
     _yt = null; // Force recreation on next access
-  }
-
-  /// Set visitor data and PO token from WebView cookies
-  static void setVisitorData(String? visitorData, String? poToken) {
-    _visitorData = visitorData;
-    _poToken = poToken;
   }
 
   /// Extract video ID from YouTube URL
@@ -58,26 +47,29 @@ class YouTubeService {
     try {
       final videoId = extractVideoId(url);
       if (videoId == null) return null;
-      
+
       // Check cache first
       final cached = _videoCache[videoId];
       if (cached != null && !cached.isExpired) {
         return cached.data;
       }
-      
+
       final video = await _executeWithRetry(() => yt.videos.get(videoId));
       _videoCache[videoId] = _CachedData(video);
       return video;
     } catch (e) {
-      print('Error getting video info: $e');
+      debugPrint('Error getting video info: $e');
       return null;
     }
   }
 
   /// Execute a function with retry logic for bot detection and timeout errors
-  Future<T> _executeWithRetry<T>(Future<T> Function() fn, {int maxAttempts = 3}) async {
+  Future<T> _executeWithRetry<T>(
+    Future<T> Function() fn, {
+    int maxAttempts = 3,
+  }) async {
     Exception? lastError;
-    
+
     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         // No external timeout - let the library handle its own timeout
@@ -85,28 +77,29 @@ class YouTubeService {
         return await fn();
       } on TimeoutException catch (e) {
         lastError = e;
-        print('Attempt $attempt/$maxAttempts: Timeout');
+        debugPrint('Attempt $attempt/$maxAttempts: Timeout');
         if (attempt < maxAttempts) {
           await _waitAndReinit(attempt);
         }
       } on SocketException catch (e) {
         lastError = e;
-        print('Attempt $attempt/$maxAttempts: Network error');
+        debugPrint('Attempt $attempt/$maxAttempts: Network error');
         if (attempt < maxAttempts) {
           await _waitAndReinit(attempt);
         }
       } on HttpException catch (e) {
         lastError = e;
-        print('Attempt $attempt/$maxAttempts: HTTP error');
+        debugPrint('Attempt $attempt/$maxAttempts: HTTP error');
         if (attempt < maxAttempts) {
           await _waitAndReinit(attempt);
         }
       } catch (e) {
         lastError = e is Exception ? e : Exception(e.toString());
         final errorMsg = e.toString().toLowerCase();
-        
+
         // Check if error is retryable
-        final isRetryable = errorMsg.contains('bot') || 
+        final isRetryable =
+            errorMsg.contains('bot') ||
             errorMsg.contains('unplayable') ||
             errorMsg.contains('sign in') ||
             errorMsg.contains('429') ||
@@ -114,9 +107,9 @@ class YouTubeService {
             errorMsg.contains('socket') ||
             errorMsg.contains('connection') ||
             errorMsg.contains('failed host lookup');
-        
+
         if (isRetryable && attempt < maxAttempts) {
-          print('Attempt $attempt/$maxAttempts: ${e.runtimeType}');
+          debugPrint('Attempt $attempt/$maxAttempts: ${e.runtimeType}');
           await _waitAndReinit(attempt);
         } else {
           throw lastError;
@@ -125,12 +118,12 @@ class YouTubeService {
     }
     throw lastError ?? Exception('Max retries exceeded');
   }
-  
+
   /// Wait with exponential backoff and reinitialize client
   Future<void> _waitAndReinit(int attempt) async {
     // Exponential backoff: 1s, 2s, 4s...
     final waitMs = 1000 * pow(2, attempt - 1).toInt();
-    print('Waiting ${waitMs}ms before retry...');
+    debugPrint('Waiting ${waitMs}ms before retry...');
     await Future.delayed(Duration(milliseconds: waitMs));
     _reinitializeClient();
   }
@@ -139,17 +132,23 @@ class YouTubeService {
   /// Only returns MUXED streams (video+audio combined) and audio-only
   /// Retrieves both standard (720p) and High-Res (1080p+) streams
   /// High-res DASH streams are marked to use the backend server
-  Future<List<DetectedMedia>> getAvailableStreams(String url, {bool useBackendForDash = true}) async {
+  Future<List<DetectedMedia>> getAvailableStreams(
+    String url, {
+    bool useBackendForDash = true,
+  }) async {
     final List<DetectedMedia> mediaList = [];
 
     try {
       final videoId = extractVideoId(url);
       if (videoId == null) return mediaList;
 
-      _reinitializeClient();
+      // Don't reinitialize client on every call — reuse the existing one.
+      // _reinitializeClient() is already called in _waitAndReinit() on errors.
 
       final video = await _executeWithRetry(() => yt.videos.get(videoId));
-      final manifest = await _executeWithRetry(() => yt.videos.streamsClient.getManifest(videoId));
+      final manifest = await _executeWithRetry(
+        () => yt.videos.streamsClient.getManifest(videoId),
+      );
       final thumbnails = video.thumbnails.highResUrl;
 
       // 1. BEST AUDIO
@@ -164,7 +163,9 @@ class YouTubeService {
         ..sort((a, b) {
           int scoreA = _getCodecScore(a);
           int scoreB = _getCodecScore(b);
-          return scoreA.compareTo(scoreB); // Low score first, High score (Safe) last
+          return scoreA.compareTo(
+            scoreB,
+          ); // Low score first, High score (Safe) last
         });
 
       for (final stream in sortedVideos) {
@@ -180,23 +181,27 @@ class YouTubeService {
         final stream = dashByResolution[res]!;
 
         // Log to debug what we picked (Expect itag 137 for 1080p)
-        print('Selected $res stream: itag=${_extractItag(stream.url.toString())} container=${stream.container.name}');
+        debugPrint(
+          'Selected $res stream: itag=${_extractItag(stream.url.toString())} container=${stream.container.name}',
+        );
 
-        mediaList.add(DetectedMedia(
-          url: url, // Original URL for backend
-          title: video.title,
-          type: MediaType.video,
-          source: MediaSource.youtube,
-          thumbnailUrl: thumbnails,
-          fileSize: stream.size.totalBytes + bestAudio.size.totalBytes,
-          quality: '$res (HD)',
-          format: 'mp4',
-          isDash: true,
-          audioUrl: bestAudio.url.toString(),
-          videoId: videoId,
-          useBackend: useBackendForDash, // Use backend for high-res
-          backendQuality: res, // e.g., "1080p"
-        ));
+        mediaList.add(
+          DetectedMedia(
+            url: url, // Original URL for backend
+            title: video.title,
+            type: MediaType.video,
+            source: MediaSource.youtube,
+            thumbnailUrl: thumbnails,
+            fileSize: stream.size.totalBytes + bestAudio.size.totalBytes,
+            quality: '$res (HD)',
+            format: 'mp4',
+            isDash: true,
+            audioUrl: bestAudio.url.toString(),
+            videoId: videoId,
+            useBackend: useBackendForDash, // Use backend for high-res
+            backendQuality: res, // e.g., "1080p"
+          ),
+        );
       }
 
       // 3. STANDARD STREAMS (Muxed) - these work without backend
@@ -205,41 +210,46 @@ class YouTubeService {
         if (height < 360) continue;
         if (dashByResolution.containsKey('${height}p')) continue;
 
-        mediaList.add(DetectedMedia(
-          url: stream.url.toString(),
-          title: video.title,
-          type: MediaType.video,
-          source: MediaSource.youtube,
-          thumbnailUrl: thumbnails,
-          fileSize: stream.size.totalBytes,
-          quality: '$height', // Simple quality label
-          format: 'mp4',
-          isDash: false,
-          videoId: videoId,
-          useBackend: false, // Muxed streams work fine directly
-        ));
+        mediaList.add(
+          DetectedMedia(
+            url: stream.url.toString(),
+            title: video.title,
+            type: MediaType.video,
+            source: MediaSource.youtube,
+            thumbnailUrl: thumbnails,
+            fileSize: stream.size.totalBytes,
+            quality: '$height', // Simple quality label
+            format: 'mp4',
+            isDash: false,
+            videoId: videoId,
+            useBackend: false, // Muxed streams work fine directly
+          ),
+        );
       }
 
       // 4. AUDIO ONLY
-      mediaList.add(DetectedMedia(
-        url: bestAudio.url.toString(),
-        title: '${video.title} (Audio)',
-        type: MediaType.audio,
-        source: MediaSource.youtube,
-        thumbnailUrl: thumbnails,
-        fileSize: bestAudio.size.totalBytes,
-        quality: 'Audio (${bestAudio.bitrate.kiloBitsPerSecond.toInt()}kbps)',
-        format: 'm4a',
-        isDash: false,
-        videoId: videoId,
-        useBackend: false,
-      ));
+      mediaList.add(
+        DetectedMedia(
+          url: bestAudio.url.toString(),
+          title: '${video.title} (Audio)',
+          type: MediaType.audio,
+          source: MediaSource.youtube,
+          thumbnailUrl: thumbnails,
+          fileSize: bestAudio.size.totalBytes,
+          quality: 'Audio (${bestAudio.bitrate.kiloBitsPerSecond.toInt()}kbps)',
+          format: 'm4a',
+          isDash: false,
+          videoId: videoId,
+          useBackend: false,
+          backendQuality: 'audio', // Tell backend extractor this is audio-only
+        ),
+      );
 
       mediaList.sort((a, b) => (b.fileSize ?? 0).compareTo(a.fileSize ?? 0));
 
       return mediaList;
     } catch (e) {
-      print('Error getting streams: $e');
+      debugPrint('Error getting streams: $e');
       return mediaList;
     }
   }
@@ -255,6 +265,7 @@ class YouTubeService {
     if (codec.startsWith('av01')) return 1; // Risky
     return 0;
   }
+
   /// Get the best quality muxed stream (video + audio)
   Future<DetectedMedia?> getBestMuxedStream(String url) async {
     try {
@@ -262,10 +273,15 @@ class YouTubeService {
       if (videoId == null) return null;
 
       final video = await _executeWithRetry(() => yt.videos.get(videoId));
-      final manifest = await _executeWithRetry(() => yt.videos.streamsClient.getManifest(videoId));
+      final manifest = await _executeWithRetry(
+        () => yt.videos.streamsClient.getManifest(videoId),
+      );
 
       final muxedStreams = manifest.muxed.toList()
-        ..sort((a, b) => b.videoResolution.height.compareTo(a.videoResolution.height));
+        ..sort(
+          (a, b) =>
+              b.videoResolution.height.compareTo(a.videoResolution.height),
+        );
 
       if (muxedStreams.isEmpty) return null;
 
@@ -281,7 +297,7 @@ class YouTubeService {
         format: best.container.name,
       );
     } catch (e) {
-      print('Error getting best muxed stream: $e');
+      debugPrint('Error getting best muxed stream: $e');
       return null;
     }
   }
@@ -293,10 +309,15 @@ class YouTubeService {
       if (videoId == null) return null;
 
       final video = await _executeWithRetry(() => yt.videos.get(videoId));
-      final manifest = await _executeWithRetry(() => yt.videos.streamsClient.getManifest(videoId));
+      final manifest = await _executeWithRetry(
+        () => yt.videos.streamsClient.getManifest(videoId),
+      );
 
       final videoStreams = manifest.videoOnly.toList()
-        ..sort((a, b) => b.videoResolution.height.compareTo(a.videoResolution.height));
+        ..sort(
+          (a, b) =>
+              b.videoResolution.height.compareTo(a.videoResolution.height),
+        );
 
       final audioStreams = manifest.audioOnly.toList()
         ..sort((a, b) => b.bitrate.compareTo(a.bitrate));
@@ -319,7 +340,7 @@ class YouTubeService {
         isDash: true,
       );
     } catch (e) {
-      print('Error getting best DASH stream: $e');
+      debugPrint('Error getting best DASH stream: $e');
       return null;
     }
   }
@@ -336,86 +357,100 @@ class YouTubeService {
     int? streamIndex,
     Function(double progress)? onProgress,
   }) async {
-    print('Starting YouTube stream download for $videoId');
-    
+    debugPrint('Starting YouTube stream download for $videoId');
+
     // Rate limiting - wait between manifest fetches to avoid "VideoUnavailable" errors
     if (_lastManifestFetch != null) {
       final elapsed = DateTime.now().difference(_lastManifestFetch!);
       if (elapsed < _minManifestInterval) {
         final waitTime = _minManifestInterval - elapsed;
-        print('Rate limiting: waiting ${waitTime.inMilliseconds}ms before fetching manifest...');
+        debugPrint(
+          'Rate limiting: waiting ${waitTime.inMilliseconds}ms before fetching manifest...',
+        );
         await Future.delayed(waitTime);
       }
     }
-    
+
     // Get fresh URL from youtube_explode
     _reinitializeClient();
     _lastManifestFetch = DateTime.now();
-    
-    final manifest = await yt.videos.streamsClient.getManifest(videoId)
+
+    final manifest = await yt.videos.streamsClient
+        .getManifest(videoId)
         .timeout(const Duration(seconds: 30));
-    
+
     final streamInfo = _findStreamByItag(manifest, streamUrl, streamIndex);
     final totalBytes = streamInfo.size.totalBytes;
-    
-    print('Got stream: ${streamInfo.runtimeType}, size: ${(totalBytes / 1024 / 1024).toStringAsFixed(1)} MB');
-    print('itag: ${_extractItag(streamInfo.url.toString())}');
-    
+
+    debugPrint(
+      'Got stream: ${streamInfo.runtimeType}, size: ${(totalBytes / 1024 / 1024).toStringAsFixed(1)} MB',
+    );
+    debugPrint('itag: ${_extractItag(streamInfo.url.toString())}');
+
     // Download using streaming
     final file = File(savePath);
     if (await file.exists()) {
       await file.delete();
     }
-    
+
     final output = file.openWrite();
     final stream = yt.videos.streamsClient.get(streamInfo);
-    
+
     int downloadedBytes = 0;
     int chunkCount = 0;
     int lastLoggedPercent = -1;
-    
+
     try {
       await for (final chunk in stream.timeout(
         const Duration(seconds: 60),
         onTimeout: (sink) {
-          print('WARNING: Stream timeout after 60s');
+          debugPrint('WARNING: Stream timeout after 60s');
           sink.close();
         },
       )) {
         output.add(chunk);
         downloadedBytes += chunk.length;
         chunkCount++;
-        
+
         if (chunkCount <= 5 || chunkCount % 100 == 0) {
-          print('Chunk $chunkCount: ${chunk.length} bytes');
+          debugPrint('Chunk $chunkCount: ${chunk.length} bytes');
         }
-        
+
         final progress = downloadedBytes / totalBytes;
         onProgress?.call(progress.clamp(0.0, 1.0));
-        
+
         final percent = (progress * 100).toInt();
         if (percent ~/ 10 > lastLoggedPercent ~/ 10) {
           lastLoggedPercent = percent;
-          print('Progress: $percent%');
+          debugPrint('Progress: $percent%');
         }
       }
-      
+
       await output.flush();
       await output.close();
-      
-      print('Downloaded $chunkCount chunks, ${(downloadedBytes / 1024 / 1024).toStringAsFixed(1)} MB');
-      
+
+      debugPrint(
+        'Downloaded $chunkCount chunks, ${(downloadedBytes / 1024 / 1024).toStringAsFixed(1)} MB',
+      );
     } catch (e) {
       await output.close();
-      print('Stream error: $e');
+      debugPrint('Stream error: $e');
       rethrow;
     }
   }
-  
+
   /// Find stream by itag or fallback
-  StreamInfo _findStreamByItag(StreamManifest manifest, String streamUrl, int? streamIndex) {
-    final allStreams = [...manifest.muxed, ...manifest.videoOnly, ...manifest.audioOnly];
-    
+  StreamInfo _findStreamByItag(
+    StreamManifest manifest,
+    String streamUrl,
+    int? streamIndex,
+  ) {
+    final allStreams = [
+      ...manifest.muxed,
+      ...manifest.videoOnly,
+      ...manifest.audioOnly,
+    ];
+
     // Try match by itag (most reliable)
     final targetItag = _extractItag(streamUrl);
     if (targetItag != null) {
@@ -425,32 +460,20 @@ class YouTubeService {
         }
       }
     }
-    
+
     // Fallback to index
     if (streamIndex != null && streamIndex < allStreams.length) {
       return allStreams[streamIndex];
     }
-    
+
     // Fallback to best muxed
     if (manifest.muxed.isNotEmpty) {
-      return (manifest.muxed.toList()..sort((a, b) => b.bitrate.compareTo(a.bitrate))).first;
+      return (manifest.muxed.toList()
+            ..sort((a, b) => b.bitrate.compareTo(a.bitrate)))
+          .first;
     }
-    
-    return allStreams.first;
-  }
 
-  /// Check if a URL corresponds to a stream (by comparing itag or other params)
-  bool _urlsMatchStream(String url, StreamInfo stream) {
-    // Extract itag from both URLs for comparison
-    final urlItag = _extractItag(url);
-    final streamItag = _extractItag(stream.url.toString());
-    
-    if (urlItag != null && streamItag != null) {
-      return urlItag == streamItag;
-    }
-    
-    // Fallback: direct URL comparison (less reliable due to expiring tokens)
-    return url == stream.url.toString();
+    return allStreams.first;
   }
 
   /// Extract itag parameter from YouTube stream URL
@@ -472,10 +495,12 @@ class YouTubeService {
     Function(double progress)? onProgress,
   }) async {
     try {
-      final manifest = await _executeWithRetry(() => yt.videos.streamsClient.getManifest(videoId));
-      
+      final manifest = await _executeWithRetry(
+        () => yt.videos.streamsClient.getManifest(videoId),
+      );
+
       StreamInfo streamInfo;
-      
+
       if (audioOnly) {
         final audioStreams = manifest.audioOnly.toList()
           ..sort((a, b) => b.bitrate.compareTo(a.bitrate));
@@ -484,7 +509,10 @@ class YouTubeService {
       } else {
         // Prefer muxed streams (video+audio together)
         final muxedStreams = manifest.muxed.toList()
-          ..sort((a, b) => b.videoResolution.height.compareTo(a.videoResolution.height));
+          ..sort(
+            (a, b) =>
+                b.videoResolution.height.compareTo(a.videoResolution.height),
+          );
         if (muxedStreams.isEmpty) throw Exception('No muxed streams available');
         streamInfo = highestQuality ? muxedStreams.first : muxedStreams.last;
       }
@@ -492,10 +520,10 @@ class YouTubeService {
       final stream = yt.videos.streamsClient.get(streamInfo);
       final file = File(savePath);
       final fileStream = file.openWrite();
-      
+
       final totalBytes = streamInfo.size.totalBytes;
       var receivedBytes = 0;
-      
+
       await for (final chunk in stream) {
         fileStream.add(chunk);
         receivedBytes += chunk.length;
@@ -503,10 +531,10 @@ class YouTubeService {
           onProgress?.call(receivedBytes / totalBytes);
         }
       }
-      
+
       await fileStream.close();
     } catch (e) {
-      print('Error downloading by video ID: $e');
+      debugPrint('Error downloading by video ID: $e');
       rethrow;
     }
   }
@@ -514,16 +542,6 @@ class YouTubeService {
   /// Clean up resources
   void dispose() {
     _yt?.close();
-  }
-
-  /// Get video title by ID (for logging)
-  Future<String> _getVideoTitle(String videoId) async {
-    try {
-      final video = await yt.videos.get(videoId);
-      return video.title;
-    } catch (_) {
-      return videoId;
-    }
   }
 
   /// Clear all caches
@@ -537,8 +555,9 @@ class YouTubeService {
 class _CachedData<T> {
   final T data;
   final DateTime cachedAt;
-  
+
   _CachedData(this.data) : cachedAt = DateTime.now();
-  
-  bool get isExpired => DateTime.now().difference(cachedAt) > YouTubeService._cacheDuration;
+
+  bool get isExpired =>
+      DateTime.now().difference(cachedAt) > YouTubeService._cacheDuration;
 }

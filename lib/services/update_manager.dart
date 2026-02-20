@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui'; // For image filter
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -8,7 +9,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import '../config/app_config.dart';
 
-/// Model class for app version information from the server
+/// Model class for app version information from GitHub
 class AppVersionInfo {
   final String version;
   final String changelog;
@@ -20,49 +21,59 @@ class AppVersionInfo {
     required this.downloadUrl,
   });
 
-  factory AppVersionInfo.fromJson(Map<String, dynamic> json) {
+  factory AppVersionInfo.fromGitHub(Map<String, dynamic> json) {
+    final String tagName = json['tag_name'] ?? 'v0.0.0';
+    final String cleanVersion = tagName.replaceAll('v', '');
+
+    String apkUrl = '';
+    // Find release APK asset
+    if (json['assets'] != null) {
+      final assets = json['assets'] as List;
+      // Prefer arm64, then universal, then any apk
+      final arm64 = assets.firstWhere(
+        (a) => a['name'].toString().contains('arm64'),
+        orElse: () => null,
+      );
+      if (arm64 != null) {
+        apkUrl = arm64['browser_download_url'];
+      } else {
+        final anyApk = assets.firstWhere(
+          (a) => a['name'].toString().endsWith('.apk'),
+          orElse: () => null,
+        );
+        if (anyApk != null) apkUrl = anyApk['browser_download_url'];
+      }
+    }
+
     return AppVersionInfo(
-      version: json['version'] ?? '0.0.0',
-      changelog: json['changelog'] ?? '',
-      downloadUrl: json['downloadUrl'] ?? '',
+      version: cleanVersion,
+      changelog: json['body'] ?? 'No changelog available.',
+      downloadUrl: apkUrl,
     );
   }
 }
 
-/// Service to manage app updates
-/// Checks for new versions from the Java backend server
-/// and handles downloading and installing updates
+/// Service to manage app updates via GitHub Releases
 class UpdateManager {
-  // Base URL from app configuration
-  static const String _baseUrl = AppConfig.backendBaseUrl;
-
-  static const String _versionEndpoint = '/api/app-version';
-
-  /// Singleton instance
   static final UpdateManager _instance = UpdateManager._internal();
   factory UpdateManager() => _instance;
   UpdateManager._internal();
 
-  /// Dio instance for downloading
   final Dio _dio = Dio();
-
-  /// Current download cancel token
   CancelToken? _cancelToken;
 
-  /// Check for app updates and show dialog if update is available
-  ///
-  /// [context] - BuildContext for showing the dialog
-  /// [showNoUpdateMessage] - If true, shows a snackbar when no update is available
   Future<void> checkForUpdates(
     BuildContext context, {
     bool showNoUpdateMessage = false,
   }) async {
     try {
-      final versionInfo = await _fetchVersionInfo();
-      if (versionInfo == null) {
+      final versionInfo = await _fetchGitHubVersionInfo();
+      if (versionInfo == null || versionInfo.downloadUrl.isEmpty) {
         if (showNoUpdateMessage && context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Unable to check for updates')),
+            const SnackBar(
+              content: Text('Unable to check for updates or no APK found'),
+            ),
           );
         }
         return;
@@ -70,276 +81,297 @@ class UpdateManager {
 
       final packageInfo = await PackageInfo.fromPlatform();
       final currentVersion = packageInfo.version;
-      final serverVersion = versionInfo.version;
 
-      debugPrint('📱 Current app version: $currentVersion');
-      debugPrint('🌐 Server version: $serverVersion');
+      debugPrint(
+        '📱 Current: $currentVersion, 🌐 GitHub: ${versionInfo.version}',
+      );
 
-      if (_isNewerVersion(serverVersion, currentVersion)) {
+      if (_isNewerVersion(versionInfo.version, currentVersion)) {
         if (context.mounted) {
-          _showUpdateDialog(context, versionInfo, currentVersion);
+          _showBeautifulUpdateDialog(context, versionInfo, currentVersion);
         }
       } else {
-        debugPrint('✅ App is up to date');
         if (showNoUpdateMessage && context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('App is up to date!')),
-          );
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('App is up to date!')));
         }
       }
     } catch (e) {
-      debugPrint('❌ Error checking for updates: $e');
+      debugPrint('❌ Update check failed: $e');
       if (showNoUpdateMessage && context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error checking for updates: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: $e')));
       }
     }
   }
 
-  /// Fetch version info from the server
-  Future<AppVersionInfo?> _fetchVersionInfo() async {
+  Future<AppVersionInfo?> _fetchGitHubVersionInfo() async {
     try {
-      final response = await http
-          .get(Uri.parse('$_baseUrl$_versionEndpoint'))
-          .timeout(const Duration(seconds: 10));
+      // https://api.github.com/repos/{owner}/{repo}/releases/latest
+      final uri = Uri.https(
+        'api.github.com',
+        '/repos/${AppConfig.githubRepoOwner}/${AppConfig.githubRepoName}/releases/latest',
+      );
 
+      final response = await http.get(uri);
       if (response.statusCode == 200) {
         final json = jsonDecode(response.body);
-        return AppVersionInfo.fromJson(json);
-      } else {
-        debugPrint('❌ Server returned status code: ${response.statusCode}');
-        return null;
+        return AppVersionInfo.fromGitHub(json);
       }
+      debugPrint('GitHub API Error: ${response.statusCode}');
+      return null;
     } catch (e) {
-      debugPrint('❌ Failed to fetch version info: $e');
+      debugPrint('Failed to fetch GitHub release: $e');
       return null;
     }
   }
 
-  /// Compare two version strings (e.g., "1.2.0" vs "1.1.0")
-  /// Returns true if [serverVersion] is newer than [currentVersion]
   bool _isNewerVersion(String serverVersion, String currentVersion) {
     try {
-      final serverParts = serverVersion.split('.').map(int.parse).toList();
-      final currentParts = currentVersion.split('.').map(int.parse).toList();
-
-      // Pad shorter version with zeros
-      while (serverParts.length < 3) serverParts.add(0);
-      while (currentParts.length < 3) currentParts.add(0);
-
-      // Compare major, minor, patch
+      final sParts = serverVersion.split('.').map(int.parse).toList();
+      final cParts = currentVersion.split('.').map(int.parse).toList();
+      while (sParts.length < 3) sParts.add(0);
+      while (cParts.length < 3) cParts.add(0);
       for (int i = 0; i < 3; i++) {
-        if (serverParts[i] > currentParts[i]) return true;
-        if (serverParts[i] < currentParts[i]) return false;
+        if (sParts[i] > cParts[i]) return true;
+        if (sParts[i] < cParts[i]) return false;
       }
-      return false; // Versions are equal
+      return false;
     } catch (e) {
-      debugPrint('❌ Error comparing versions: $e');
       return false;
     }
   }
 
-  /// Show update dialog with changelog
-  void _showUpdateDialog(
+  void _showBeautifulUpdateDialog(
     BuildContext context,
-    AppVersionInfo versionInfo,
-    String currentVersion,
+    AppVersionInfo info,
+    String currentVer,
   ) {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (dialogContext) => AlertDialog(
-        title: Row(
-          children: [
-            Icon(
-              Icons.system_update,
-              color: Theme.of(context).colorScheme.primary,
-            ),
-            const SizedBox(width: 8),
-            const Text('Update Available'),
-          ],
-        ),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.primaryContainer,
-                  borderRadius: BorderRadius.circular(8),
+      builder: (ctx) => BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 5, sigmaY: 5),
+        child: Dialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24),
+          ),
+          elevation: 16,
+          backgroundColor: Colors.transparent, // Glass effect base
+          child: Container(
+            decoration: BoxDecoration(
+              color: Theme.of(context).scaffoldBackgroundColor.withValues(alpha: 0.9),
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(
+                color: Colors.white.withValues(alpha: 0.2),
+                width: 1.5,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.2),
+                  blurRadius: 20,
+                  spreadRadius: 5,
                 ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Header Image / Icon
+                Container(
+                  height: 120,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [Colors.purple.shade900, Colors.deepPurple],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    borderRadius: const BorderRadius.vertical(
+                      top: Radius.circular(24),
+                    ),
+                  ),
+                  child: Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Text(
-                          'Current: v$currentVersion',
-                          style: TextStyle(
-                            color:
-                                Theme.of(context).colorScheme.onPrimaryContainer,
-                          ),
+                        const Icon(
+                          Icons.rocket_launch,
+                          size: 48,
+                          color: Colors.white,
                         ),
-                        const SizedBox(height: 4),
+                        const SizedBox(height: 8),
                         Text(
-                          'New: v${versionInfo.version}',
+                          'New Version Available!',
                           style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.95),
                             fontWeight: FontWeight.bold,
-                            color:
-                                Theme.of(context).colorScheme.onPrimaryContainer,
+                            fontSize: 18,
                           ),
                         ),
                       ],
                     ),
-                    Icon(
-                      Icons.arrow_forward,
-                      color: Theme.of(context).colorScheme.onPrimaryContainer,
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'What\'s New:',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  versionInfo.changelog,
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.onSurface,
                   ),
                 ),
-              ),
-            ],
+
+                Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: [
+                          _buildVersionBadge(
+                            context,
+                            'Current',
+                            currentVer,
+                            Colors.grey,
+                          ),
+                          const Icon(
+                            Icons.arrow_forward_rounded,
+                            color: Colors.grey,
+                          ),
+                          _buildVersionBadge(
+                            context,
+                            'New',
+                            info.version,
+                            Colors.green,
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 24),
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          'What\'s New',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Container(
+                        height: 100,
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: SingleChildScrollView(
+                          child: Text(info.changelog),
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextButton(
+                              onPressed: () => Navigator.pop(ctx),
+                              child: const Text('Maybe Later'),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: FilledButton.icon(
+                              onPressed: () {
+                                Navigator.pop(ctx);
+                                _startUpdate(
+                                  context,
+                                  info.downloadUrl,
+                                  info.version,
+                                );
+                              },
+                              style: FilledButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 12,
+                                ),
+                              ),
+                              icon: const Icon(Icons.system_update_alt),
+                              label: const Text('Update Now'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('Later'),
-          ),
-          FilledButton.icon(
-            onPressed: () {
-              Navigator.of(dialogContext).pop();
-              _startUpdate(context, versionInfo.downloadUrl, versionInfo.version);
-            },
-            icon: const Icon(Icons.download),
-            label: const Text('Update Now'),
-          ),
-        ],
       ),
     );
   }
 
-  /// Start downloading and installing the update
+  Widget _buildVersionBadge(
+    BuildContext context,
+    String label,
+    String version,
+    Color color,
+  ) {
+    return Column(
+      children: [
+        Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+        const SizedBox(height: 4),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.1),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: color.withValues(alpha: 0.5)),
+          ),
+          child: Text(
+            'v$version',
+            style: TextStyle(fontWeight: FontWeight.bold, color: color),
+          ),
+        ),
+      ],
+    );
+  }
+
   Future<void> _startUpdate(
     BuildContext context,
-    String downloadUrl,
+    String url,
     String version,
   ) async {
     try {
-      debugPrint('🚀 Starting update download from: $downloadUrl');
+      final dir = await getTemporaryDirectory();
+      final path = '${dir.path}/MediaTube-v$version.apk';
+      if (await File(path).exists()) await File(path).delete();
 
-      // Get the download directory
-      final Directory tempDir = await getTemporaryDirectory();
-      final String apkPath = '${tempDir.path}/MediaTube-$version.apk';
-
-      // Delete old APK if exists
-      final File apkFile = File(apkPath);
-      if (await apkFile.exists()) {
-        await apkFile.delete();
-      }
-
-      // Show download progress dialog
       if (!context.mounted) return;
-
       _cancelToken = CancelToken();
 
       showDialog(
         context: context,
         barrierDismissible: false,
-        builder: (dialogContext) => _DownloadProgressDialog(
-          downloadUrl: downloadUrl,
-          apkPath: apkPath,
+        builder: (ctx) => _DownloadProgressDialog(
+          downloadUrl: url,
+          apkPath: path,
           dio: _dio,
           cancelToken: _cancelToken!,
           onComplete: () {
-            Navigator.of(dialogContext).pop();
-            _installApk(context, apkPath);
+            Navigator.pop(ctx);
+            OpenFilex.open(path);
           },
-          onError: (error) {
-            Navigator.of(dialogContext).pop();
-            if (context.mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Download failed: $error')),
-              );
-            }
+          onError: (msg) {
+            Navigator.pop(ctx);
+            ScaffoldMessenger.of(
+              context,
+            ).showSnackBar(SnackBar(content: Text(msg)));
           },
-          onCancel: () {
-            Navigator.of(dialogContext).pop();
-          },
+          onCancel: () => Navigator.pop(ctx),
         ),
       );
     } catch (e) {
-      debugPrint('❌ Error starting update: $e');
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to start update: $e')),
-        );
-      }
+      debugPrint('Update Error: $e');
     }
-  }
-
-  /// Install the downloaded APK
-  Future<void> _installApk(BuildContext context, String apkPath) async {
-    try {
-      debugPrint('📦 Installing APK from: $apkPath');
-
-      final result = await OpenFilex.open(apkPath);
-
-      if (result.type != ResultType.done) {
-        debugPrint('❌ Failed to open APK: ${result.message}');
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Failed to install: ${result.message}'),
-              action: SnackBarAction(
-                label: 'Retry',
-                onPressed: () => _installApk(context, apkPath),
-              ),
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      debugPrint('❌ Error installing APK: $e');
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to install update: $e')),
-        );
-      }
-    }
-  }
-
-  /// Cancel any ongoing download
-  void cancelUpdate() {
-    _cancelToken?.cancel('Update cancelled by user');
-    _cancelToken = null;
   }
 }
 
-/// Dialog widget to show download progress
 class _DownloadProgressDialog extends StatefulWidget {
   final String downloadUrl;
   final String apkPath;
@@ -366,107 +398,62 @@ class _DownloadProgressDialog extends StatefulWidget {
 
 class _DownloadProgressDialogState extends State<_DownloadProgressDialog> {
   double _progress = 0;
-  String _status = 'Starting download...';
-  bool _isDownloading = true;
+  String _status = 'Starting...';
 
   @override
   void initState() {
     super.initState();
-    _startDownload();
+    _start();
   }
 
-  Future<void> _startDownload() async {
+  void _start() async {
     try {
       await widget.dio.download(
         widget.downloadUrl,
         widget.apkPath,
         cancelToken: widget.cancelToken,
-        onReceiveProgress: (received, total) {
-          if (total != -1) {
+        onReceiveProgress: (rec, total) {
+          if (total != -1 && mounted) {
             setState(() {
-              _progress = received / total;
+              _progress = rec / total;
               _status =
-                  'Downloading... ${(received / 1024 / 1024).toStringAsFixed(1)} MB / ${(total / 1024 / 1024).toStringAsFixed(1)} MB';
+                  '${(rec / 1024 / 1024).toStringAsFixed(1)}MB / ${(total / 1024 / 1024).toStringAsFixed(1)}MB';
             });
           }
         },
-        options: Options(
-          responseType: ResponseType.bytes,
-          followRedirects: true,
-          receiveTimeout: const Duration(minutes: 10),
-        ),
       );
-
-      setState(() {
-        _isDownloading = false;
-        _status = 'Download complete!';
-      });
-
-      // Small delay before installing
+      if (mounted) {
+        setState(() => _status = 'Installing...');
+      }
       await Future.delayed(const Duration(milliseconds: 500));
       widget.onComplete();
-    } on DioException catch (e) {
-      if (e.type == DioExceptionType.cancel) {
-        debugPrint('📥 Download cancelled');
-        widget.onCancel();
-      } else {
-        debugPrint('❌ Download error: $e');
-        widget.onError(e.message ?? 'Download failed');
-      }
     } catch (e) {
-      debugPrint('❌ Download error: $e');
-      widget.onError(e.toString());
+      if (!CancelToken.isCancel(e as DioException)) {
+        widget.onError(e.toString());
+      } else {
+        widget.onCancel();
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: Row(
-        children: [
-          Icon(
-            _isDownloading ? Icons.downloading : Icons.check_circle,
-            color: _isDownloading
-                ? Theme.of(context).colorScheme.primary
-                : Colors.green,
-          ),
-          const SizedBox(width: 8),
-          Text(_isDownloading ? 'Downloading Update' : 'Download Complete'),
-        ],
-      ),
+      title: const Text('Downloading Update'),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          LinearProgressIndicator(
-            value: _progress,
-            backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
-          ),
+          LinearProgressIndicator(value: _progress),
           const SizedBox(height: 16),
-          Text(
-            _status,
-            style: Theme.of(context).textTheme.bodyMedium,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            '${(_progress * 100).toStringAsFixed(0)}%',
-            style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                  fontWeight: FontWeight.bold,
-                  color: Theme.of(context).colorScheme.primary,
-                ),
-          ),
+          Text(_status),
         ],
       ),
-      actions: _isDownloading
-          ? [
-              TextButton(
-                onPressed: () {
-                  widget.cancelToken.cancel('Cancelled by user');
-                },
-                child: const Text('Cancel'),
-              ),
-            ]
-          : null,
+      actions: [
+        TextButton(
+          onPressed: () => widget.cancelToken.cancel(),
+          child: const Text('Cancel'),
+        ),
+      ],
     );
   }
 }
-

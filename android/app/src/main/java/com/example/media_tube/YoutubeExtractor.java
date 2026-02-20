@@ -147,19 +147,41 @@ public class YoutubeExtractor {
         });
     }
 
+    private org.schabi.newpipe.extractor.StreamingService getStreamService(String url) {
+        String lower = url.toLowerCase();
+        try {
+            if (lower.contains("soundcloud.com"))
+                return ServiceList.SoundCloud;
+            if (lower.contains("bandcamp.com"))
+                return ServiceList.Bandcamp;
+            if (lower.contains("media.ccc.de"))
+                return ServiceList.MediaCCC;
+            if (lower.contains("peertube") || lower.contains("framatube"))
+                return ServiceList.PeerTube;
+        } catch (Exception e) {
+        }
+        return ServiceList.YouTube;
+    }
+
     /**
      * Get video info including title, duration, and available formats.
      */
     private Map<String, Object> getVideoInfo(String url) throws Exception {
         ensureInitialized();
 
+        org.schabi.newpipe.extractor.StreamingService service = getStreamService(url);
+        String streamUrl = url;
         String videoId = extractVideoId(url);
-        if (videoId == null)
-            throw new Exception("Invalid YouTube URL");
 
-        String videoUrl = "https://www.youtube.com/watch?v=" + videoId;
-        YoutubeService service = (YoutubeService) ServiceList.YouTube;
-        StreamExtractor extractor = service.getStreamExtractor(videoUrl);
+        if (service == ServiceList.YouTube) {
+            if (videoId == null)
+                throw new Exception("Invalid YouTube URL");
+            streamUrl = "https://www.youtube.com/watch?v=" + videoId;
+        } else {
+            videoId = Math.abs(url.hashCode()) + "";
+        }
+
+        StreamExtractor extractor = service.getStreamExtractor(streamUrl);
         extractor.fetchPage();
 
         Map<String, Object> info = new HashMap<>();
@@ -223,13 +245,19 @@ public class YoutubeExtractor {
     private Map<String, Object> getDirectUrls(String url, String quality) throws Exception {
         ensureInitialized();
 
+        org.schabi.newpipe.extractor.StreamingService service = getStreamService(url);
+        String streamUrl = url;
         String videoId = extractVideoId(url);
-        if (videoId == null)
-            throw new Exception("Invalid YouTube URL");
 
-        String videoUrl = "https://www.youtube.com/watch?v=" + videoId;
-        YoutubeService service = (YoutubeService) ServiceList.YouTube;
-        StreamExtractor extractor = service.getStreamExtractor(videoUrl);
+        if (service == ServiceList.YouTube) {
+            if (videoId == null)
+                throw new Exception("Invalid YouTube URL");
+            streamUrl = "https://www.youtube.com/watch?v=" + videoId;
+        } else {
+            videoId = Math.abs(url.hashCode()) + "";
+        }
+
+        StreamExtractor extractor = service.getStreamExtractor(streamUrl);
         extractor.fetchPage();
 
         int targetHeight = parseQuality(quality);
@@ -239,6 +267,32 @@ public class YoutubeExtractor {
         result.put("videoId", videoId);
         result.put("title", title);
         result.put("duration", extractor.getLength());
+
+        // AUDIO-ONLY mode: return best audio stream directly
+        if (targetHeight == -1) {
+            AudioStream bestAudio = null;
+            int bestAudioBitrate = 0;
+
+            for (AudioStream stream : extractor.getAudioStreams()) {
+                if (stream.getBitrate() > bestAudioBitrate) {
+                    bestAudio = stream;
+                    bestAudioBitrate = stream.getBitrate();
+                }
+            }
+
+            if (bestAudio == null) {
+                throw new Exception("No audio streams available");
+            }
+
+            result.put("needsMerge", false);
+            result.put("videoUrl", bestAudio.getContent()); // Audio URL in videoUrl field for single-stream download
+            result.put("audioUrl", null);
+            result.put("videoFormat", bestAudio.getFormat().getName());
+            result.put("actualQuality", "audio");
+            Log.i(TAG, "Direct URLs: audio-only (" + bestAudioBitrate + " bps)");
+
+            return result;
+        }
 
         // Try combined streams first (video + audio together - no merge needed)
         VideoStream bestCombined = null;
@@ -258,31 +312,50 @@ public class YoutubeExtractor {
 
         for (VideoStream stream : extractor.getVideoOnlyStreams()) {
             int h = extractHeight(stream.getResolution());
-            if (h <= targetHeight && h > bestVideoOnlyHeight) {
-                bestVideoOnly = stream;
-                bestVideoOnlyHeight = h;
+            if (h <= targetHeight) {
+                if (h > bestVideoOnlyHeight) {
+                    bestVideoOnly = stream;
+                    bestVideoOnlyHeight = h;
+                } else if (h == bestVideoOnlyHeight) {
+                    // Prefer MPEG-4 for broader native Muxer support
+                    if (stream.getFormat().getName().contains("MPEG-4")
+                            && !bestVideoOnly.getFormat().getName().contains("MPEG-4")) {
+                        bestVideoOnly = stream;
+                    }
+                }
             }
         }
 
-        // Find best audio stream
-        AudioStream bestAudio = null;
-        int bestAudioBitrate = 0;
+        // Find best audio stream matching the video container
+        AudioStream bestAudioV = null;
+        int bestAudioVBitrate = 0;
+        String targetAudioFormat = (bestVideoOnly != null && bestVideoOnly.getFormat().getName().contains("WebM"))
+                ? "WebM"
+                : "M4A";
 
         for (AudioStream stream : extractor.getAudioStreams()) {
-            if (stream.getBitrate() > bestAudioBitrate) {
-                bestAudio = stream;
-                bestAudioBitrate = stream.getBitrate();
+            boolean matchesContainer = stream.getFormat().getName().contains(targetAudioFormat);
+
+            if (matchesContainer) {
+                if (bestAudioV == null || !bestAudioV.getFormat().getName().contains(targetAudioFormat)
+                        || stream.getBitrate() > bestAudioVBitrate) {
+                    bestAudioV = stream;
+                    bestAudioVBitrate = stream.getBitrate();
+                }
+            } else if (bestAudioV == null) {
+                bestAudioV = stream;
+                bestAudioVBitrate = stream.getBitrate();
             }
         }
 
         // Prefer video-only + audio if it gives higher quality, otherwise use combined
-        if (bestVideoOnlyHeight > bestCombinedHeight && bestAudio != null) {
+        if (bestVideoOnlyHeight > bestCombinedHeight && bestAudioV != null) {
             // Use DASH - separate video + audio (needs merge on client)
             result.put("needsMerge", true);
             result.put("videoUrl", bestVideoOnly.getContent());
-            result.put("audioUrl", bestAudio.getContent());
+            result.put("audioUrl", bestAudioV.getContent());
             result.put("videoFormat", bestVideoOnly.getFormat().getName());
-            result.put("audioFormat", bestAudio.getFormat().getName());
+            result.put("audioFormat", bestAudioV.getFormat().getName());
             result.put("actualQuality", bestVideoOnlyHeight + "p");
             Log.i(TAG, "Direct URLs: " + bestVideoOnlyHeight + "p DASH (needs merge)");
         } else if (bestCombined != null) {
@@ -303,7 +376,7 @@ public class YoutubeExtractor {
     // --- Utility Methods ---
 
     private String extractVideoId(String url) {
-        Pattern pattern = Pattern.compile("(?:v=|/v/|youtu\\.be/|/embed/|/shorts/)([a-zA-Z0-9_-]{11})");
+        Pattern pattern = Pattern.compile("(?:v=|/v/|youtu\\.be/|/embed/|/shorts/|/live/)([a-zA-Z0-9_-]{11})");
         Matcher m = pattern.matcher(url);
         return m.find() ? m.group(1) : null;
     }
@@ -319,6 +392,8 @@ public class YoutubeExtractor {
         if (q == null || q.equals("best"))
             return 9999;
         switch (q.toLowerCase()) {
+            case "audio":
+                return -1; // Sentinel: audio-only mode
             case "360p":
                 return 360;
             case "480p":

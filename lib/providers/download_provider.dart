@@ -29,7 +29,11 @@ class DownloadProvider extends ChangeNotifier {
   // Track last progress values to avoid unnecessary updates
   final Map<String, double> _lastProgressValues = {};
 
-  // Limit concurrent downloads to reduce CPU load
+  // Speed tracking for notifications
+  final Map<String, int> _lastBytesValues = {};
+  final Map<String, DateTime> _lastTimeValues = {};
+
+  // Limit concurrent downloads - 2 max to prevent bandwidth/thread saturation on mobile
   static const int _maxConcurrentDownloads = 2;
 
   List<DownloadTask> get downloads => List.unmodifiable(_downloads);
@@ -102,6 +106,33 @@ class DownloadProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Save all active/pending downloads to history (called on app pause/terminate)
+  /// This ensures no download is lost even if the app is killed by the OS.
+  /// Does NOT change the status of actively downloading tasks — the foreground
+  /// service keeps them running. Only creates history snapshots for crash recovery.
+  Future<void> saveActiveDownloadsToHistory() async {
+    for (final download in _downloads) {
+      if (download.status == DownloadStatus.downloading ||
+          download.status == DownloadStatus.pending ||
+          download.status == DownloadStatus.merging) {
+        // Save a SNAPSHOT to history for crash recovery, but do NOT alter the
+        // live task's status — the download is still running via the foreground
+        // service. If the OS actually kills the process, on next launch the
+        // history entry will show the last known state so the user can retry.
+        final snapshot = download.copyWith(
+          status: DownloadStatus.paused,
+          statusMessage: 'Interrupted - app closed',
+        );
+        await _saveToHistory(snapshot);
+      } else if (download.status == DownloadStatus.paused ||
+                 download.status == DownloadStatus.completed ||
+                 download.status == DownloadStatus.failed) {
+        // Ensure all non-cancelled downloads are persisted
+        await _saveToHistory(download);
+      }
+    }
+  }
+
   Future<void> _saveToHistory(DownloadTask task) async {
     await _historyService.saveDownload(task);
     // Refresh history
@@ -128,14 +159,15 @@ class DownloadProvider extends ChangeNotifier {
         )
         .length;
 
-    if (currentlyDownloading > _maxConcurrentDownloads) {
+    if (currentlyDownloading >= _maxConcurrentDownloads) {
       // Queue this download - it will stay in pending state
       task.status = DownloadStatus.pending;
       task.statusMessage = 'Queued...';
       notifyListeners();
 
-      // Wait for a slot to open up
-      await _waitForDownloadSlot(task.id);
+      // Just return, do NOT wait.
+      // _startNextQueuedDownload will pick this up when a slot opens.
+      return;
     }
 
     // Start background service for persistent downloads
@@ -172,6 +204,8 @@ class DownloadProvider extends ChangeNotifier {
             downloadId: notificationId,
           );
         }
+        // Start next queued download
+        _startNextQueuedDownload();
         // Stop service if no more downloads
         if (!hasActiveDownloads && !hasPausedDownloads) {
           _backgroundService.stopService();
@@ -180,42 +214,18 @@ class DownloadProvider extends ChangeNotifier {
     );
   }
 
-  /// Wait for a download slot to open up
-  Future<void> _waitForDownloadSlot(String taskId) async {
-    while (true) {
-      final downloading = _downloads
-          .where(
-            (d) =>
-                d.status == DownloadStatus.downloading ||
-                d.status == DownloadStatus.merging,
-          )
-          .length;
-
-      if (downloading < _maxConcurrentDownloads) {
-        break;
-      }
-
-      // Check if this task was cancelled
-      final task = _downloads.firstWhere(
-        (d) => d.id == taskId,
-        orElse: () => DownloadTask(
-          id: '',
-          url: '',
-          fileName: '',
-          savePath: '',
-          status: DownloadStatus.cancelled,
-        ),
-      );
-      if (task.status == DownloadStatus.cancelled) {
-        break;
-      }
-
-      await Future.delayed(const Duration(milliseconds: 500));
-    }
-  }
-
   /// Start the next queued download
-  void _startNextQueuedDownload() {
+  Future<void> _startNextQueuedDownload() async {
+    // Check concurrent download limit to prevent race conditions
+    final activeCount = _downloads
+        .where(
+          (d) =>
+              d.status == DownloadStatus.downloading ||
+              d.status == DownloadStatus.merging,
+        )
+        .length;
+    if (activeCount >= _maxConcurrentDownloads) return;
+
     final pendingDownloads = _downloads
         .where((d) => d.status == DownloadStatus.pending)
         .toList();
@@ -223,6 +233,9 @@ class DownloadProvider extends ChangeNotifier {
       final nextTask = pendingDownloads.first;
       final media = _mediaMap[nextTask.id];
       if (media != null) {
+        // Ensure foreground service is running for queued downloads
+        await _backgroundService.startService();
+
         // Resume the pending download
         final notificationId = _notificationId++;
         _downloadService.startDownload(
@@ -279,6 +292,24 @@ class DownloadProvider extends ChangeNotifier {
       if (progressDiff >= 0.02 ||
           updatedTask.status == DownloadStatus.merging) {
         _lastProgressValues[updatedTask.id] = updatedTask.progress;
+
+        // Calculate download speed
+        int? speedBytesPerSec;
+        final now = DateTime.now();
+        final lastBytes = _lastBytesValues[updatedTask.id] ?? 0;
+        final lastTime = _lastTimeValues[updatedTask.id];
+
+        if (lastTime != null && updatedTask.downloadedBytes > lastBytes) {
+          final elapsedMs = now.difference(lastTime).inMilliseconds;
+          if (elapsedMs > 0) {
+            speedBytesPerSec =
+                ((updatedTask.downloadedBytes - lastBytes) * 1000 ~/ elapsedMs);
+          }
+        }
+
+        _lastBytesValues[updatedTask.id] = updatedTask.downloadedBytes;
+        _lastTimeValues[updatedTask.id] = now;
+
         _backgroundService.updateProgressDetailed(
           title: updatedTask.fileName,
           progress: updatedTask.progress,
@@ -286,6 +317,7 @@ class DownloadProvider extends ChangeNotifier {
           totalBytes: updatedTask.totalBytes,
           isMerging: updatedTask.status == DownloadStatus.merging,
           downloadId: notificationId,
+          speedBytesPerSec: speedBytesPerSec,
         );
 
         // Trigger UI update (throttled)
@@ -320,7 +352,7 @@ class DownloadProvider extends ChangeNotifier {
     }
   }
 
-  /// Resume a paused download
+  /// Resume a paused download - refetches fresh URLs to handle expiration
   Future<void> resumeDownload(String taskId) async {
     final index = _downloads.indexWhere((d) => d.id == taskId);
     if (index == -1) return;
@@ -336,18 +368,67 @@ class DownloadProvider extends ChangeNotifier {
       return;
     }
 
+    // Check concurrent download limit before resuming
+    final activeCount = _downloads
+        .where(
+          (d) =>
+              d.status == DownloadStatus.downloading ||
+              d.status == DownloadStatus.merging,
+        )
+        .length;
+    if (activeCount >= _maxConcurrentDownloads) {
+      // Queue it as pending instead of starting immediately
+      task.status = DownloadStatus.pending;
+      task.statusMessage = 'Queued...';
+      _immediateNotify();
+      return;
+    }
+
+    // Update status to show we're preparing to resume
+    task.status = DownloadStatus.downloading;
+    task.statusMessage = 'Refreshing URLs...';
+    _immediateNotify();
+
+    // For YouTube videos, refetch fresh URLs (they expire after ~6 hours)
+    DetectedMedia freshMedia = media;
+    if (media.source == MediaSource.youtube && media.url.isNotEmpty) {
+      final tempService = BackendDownloadService();
+      try {
+        final quality = media.backendQuality ?? 'best';
+        final directUrls = await tempService
+            .getDirectUrls(media.url, quality)
+            .timeout(const Duration(seconds: 15));
+
+        if (directUrls != null) {
+          freshMedia = media.copyWith(
+            isDash: directUrls.needsMerge,
+            videoId: directUrls.videoId,
+          );
+          _mediaMap[taskId] = freshMedia;
+          debugPrint('✅ Refreshed URLs for resume: ${media.title}');
+        }
+      } catch (e) {
+        debugPrint('⚠️ Failed to refresh URLs, trying with cached: $e');
+      } finally {
+        tempService.dispose();
+      }
+    }
+
     // Store media in download service for resume
-    _downloadService.storeMedia(taskId, media);
+    _downloadService.storeMedia(taskId, freshMedia);
 
     final notificationId = _notificationId++;
 
     // Start background service
     await _backgroundService.startService();
 
-    // Resume download
+    // Clear paused state and resume download
+    _downloadService.clearPausedState(taskId);
+
+    // Resume download with fresh media
     _downloadService.startDownload(
       task,
-      media,
+      freshMedia,
       onProgress: (updatedTask) {
         _updateTaskThrottled(updatedTask, notificationId);
       },
@@ -357,6 +438,7 @@ class DownloadProvider extends ChangeNotifier {
           title: updatedTask.fileName,
           downloadId: notificationId,
         );
+        _startNextQueuedDownload();
         if (!hasActiveDownloads && !hasPausedDownloads) {
           _backgroundService.stopService();
         }
@@ -370,6 +452,7 @@ class DownloadProvider extends ChangeNotifier {
             downloadId: notificationId,
           );
         }
+        _startNextQueuedDownload();
         if (!hasActiveDownloads && !hasPausedDownloads) {
           _backgroundService.stopService();
         }
@@ -408,13 +491,18 @@ class DownloadProvider extends ChangeNotifier {
     }
   }
 
-  /// Remove a download from the list
-  void removeDownload(String taskId) {
+  /// Remove a download from the list (and history for consistency)
+  Future<void> removeDownload(String taskId) async {
     _downloads.removeWhere((d) => d.id == taskId);
     _mediaMap.remove(taskId);
     _lastProgressValues.remove(taskId);
     _progressNotifiers[taskId]?.dispose();
     _progressNotifiers.remove(taskId);
+
+    // Also remove from persisted history to prevent orphaned entries
+    await _historyService.removeFromHistory(taskId);
+    _historyDownloads.removeWhere((d) => d.id == taskId);
+
     _immediateNotify();
   }
 
@@ -514,6 +602,7 @@ class DownloadProvider extends ChangeNotifier {
       download.status = DownloadStatus.cancelled;
       _lastProgressValues.remove(download.id);
     }
+    _backgroundService.stopService();
     _immediateNotify();
   }
 
@@ -537,6 +626,12 @@ class DownloadProvider extends ChangeNotifier {
   void dispose() {
     _updateThrottleTimer?.cancel();
     _lastProgressValues.clear();
+    _lastBytesValues.clear();
+    _lastTimeValues.clear();
+    for (final notifier in _progressNotifiers.values) {
+      notifier.dispose();
+    }
+    _progressNotifiers.clear();
     _downloadService.dispose();
     super.dispose();
   }

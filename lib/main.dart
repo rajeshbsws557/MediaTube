@@ -1,15 +1,23 @@
+// Developer - Rajesh Biswas
+// Website - https://rajeshbiswas.dev
+// GitHub - https://github.com/rajeshbsws557
+// Version - 1.0.0
+// License - MIT
+
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'providers/providers.dart';
 import 'screens/screens.dart';
 import 'services/update_manager.dart';
+import 'services/security_service.dart';
+import 'package:receive_sharing_intent/receive_sharing_intent.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+
   // Performance optimizations
   // Enable Impeller on Android for better rendering (if available)
   // Reduce jank by pre-warming image cache
@@ -34,6 +42,9 @@ void main() async {
   )) {
     // WebView is supported
   }
+
+  // Initialize port for foreground task communication
+  FlutterForegroundTask.initCommunicationPort();
 
   runApp(const MediaTubeApp());
 }
@@ -88,14 +99,83 @@ class MediaTubeHome extends StatefulWidget {
   State<MediaTubeHome> createState() => _MediaTubeHomeState();
 }
 
-class _MediaTubeHomeState extends State<MediaTubeHome> {
+class _MediaTubeHomeState extends State<MediaTubeHome>
+    with WidgetsBindingObserver {
   bool _permissionsGranted = false;
   bool _updateCheckDone = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _checkPermissions();
+    _configureIntentHandling();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  // Guard to avoid duplicate saves on rapid lifecycle events
+  bool _hasSavedOnPause = false;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // Save on BOTH paused and detached for maximum reliability.
+    // AppLifecycleState.detached is unreliable on Android and often never fires.
+    // Saving on paused ensures history is persisted when user switches apps or
+    // the OS kills the app. The foreground service keeps downloads running.
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      if (!_hasSavedOnPause) {
+        _hasSavedOnPause = true;
+        context.read<DownloadProvider>().saveActiveDownloadsToHistory();
+      }
+    } else if (state == AppLifecycleState.resumed) {
+      _hasSavedOnPause = false;
+    }
+  }
+
+  void _configureIntentHandling() {
+    // Listen for intent while app is running
+    ReceiveSharingIntent.instance.getMediaStream().listen(
+      (List<SharedMediaFile> value) {
+        if (value.isNotEmpty && value.first.path.isNotEmpty) {
+          _handleSharedContent(value.first.path);
+        }
+      },
+      onError: (err) {
+        debugPrint("Intent Error: $err");
+      },
+    );
+
+    // Check intent on app startup
+    ReceiveSharingIntent.instance.getInitialMedia().then((
+      List<SharedMediaFile> value,
+    ) {
+      if (value.isNotEmpty && value.first.path.isNotEmpty) {
+        _handleSharedContent(value.first.path);
+      }
+    });
+  }
+
+  Future<void> _handleSharedContent(String content) async {
+    debugPrint("Shared content received: $content");
+    // YouTube share often comes as "Title https://youtu.be/..." or just URL
+    // Extract generic URL logic
+    final urlRegex = RegExp(r'https?://\S+');
+    final match = urlRegex.firstMatch(content);
+    final url =
+        match?.group(0) ??
+        content; // Use extracted URL or full content if no match
+
+    // Set pending URL for BrowserScreen to handle
+    if (context.mounted) {
+      context.read<BrowserProvider>().setPendingUrl(url);
+    }
   }
 
   Future<void> _checkPermissions() async {
@@ -110,18 +190,38 @@ class _MediaTubeHomeState extends State<MediaTubeHome> {
     // This runs once when the app starts
     if (!_updateCheckDone) {
       _updateCheckDone = true;
-      // Use addPostFrameCallback to ensure context is available
+      // Schedule checks to run AFTER the first frame is rendered to avoid startup freeze
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        _checkForUpdates();
+        _runStartupChecks();
       });
     }
   }
 
-  Future<void> _checkForUpdates() async {
-    // Small delay to ensure the UI is fully rendered before showing dialog
-    await Future.delayed(const Duration(milliseconds: 500));
-    if (mounted) {
-      await UpdateManager().checkForUpdates(context);
+  Future<void> _runStartupChecks() async {
+    // Give UI time to stabilize completely (non-blocking delay)
+    await Future.delayed(const Duration(seconds: 3));
+
+    try {
+      // 1. Verify Security (Anti-Clone) - Fast local check
+      if (!mounted) return;
+
+      // Use microtask to ensure we don't block the main thread even for local check
+      final secure = await Future.microtask(() async {
+        if (!mounted) return true;
+        return await SecurityService().verifyIntegrity(context);
+      });
+
+      if (!secure) return;
+
+      // 2. Check for Updates - Network call (slow)
+      if (mounted) {
+        // Run completely in background, don't await result to avoid blocking
+        UpdateManager().checkForUpdates(context).catchError((e) {
+          debugPrint("Update check background error: $e");
+        });
+      }
+    } catch (e) {
+      debugPrint("Startup check error: $e");
     }
   }
 

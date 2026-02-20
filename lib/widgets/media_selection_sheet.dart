@@ -25,17 +25,17 @@ class MediaSelectionSheet extends StatefulWidget {
 
 class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
   bool _isRefreshing = false;
-  
+
   void _handleRefresh() async {
     if (_isRefreshing || widget.isFetching) return;
-    
+
     setState(() {
       _isRefreshing = true;
     });
-    
+
     // Call the refresh callback
     widget.onRefresh();
-    
+
     // Reset after a short delay (the actual fetch is async)
     await Future.delayed(const Duration(milliseconds: 500));
     if (mounted) {
@@ -70,14 +70,19 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
-              
+
               // Header
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 8,
+                ),
                 child: Row(
                   children: [
                     Icon(
-                      widget.isYouTube ? Icons.play_circle : Icons.video_library,
+                      widget.isYouTube
+                          ? Icons.play_circle
+                          : Icons.video_library,
                       color: widget.isYouTube ? Colors.red : null,
                     ),
                     const SizedBox(width: 8),
@@ -86,15 +91,16 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            widget.isYouTube ? 'YouTube Streams' : 'Detected Media',
+                            widget.isYouTube
+                                ? 'YouTube Streams'
+                                : 'Detected Media',
                             style: Theme.of(context).textTheme.titleLarge,
                           ),
                           if (widget.media.isNotEmpty)
                             Text(
                               '${widget.media.length} streams available',
-                              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                color: Colors.grey[600],
-                              ),
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(color: Colors.grey[600]),
                             ),
                         ],
                       ),
@@ -105,31 +111,34 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
                             ? const SizedBox(
                                 width: 20,
                                 height: 20,
-                                child: CircularProgressIndicator(strokeWidth: 2),
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
                               )
                             : const Icon(Icons.refresh),
                         tooltip: 'Refresh streams',
-                        onPressed: (_isRefreshing || widget.isFetching) ? null : _handleRefresh,
+                        onPressed: (_isRefreshing || widget.isFetching)
+                            ? null
+                            : _handleRefresh,
                       ),
                   ],
                 ),
               ),
-              
+
               // Quick download button for best quality
-              if (widget.media.isNotEmpty)
-                _buildQuickDownloadBar(context),
-              
+              if (widget.media.isNotEmpty) _buildQuickDownloadBar(context),
+
               const Divider(height: 1),
-              
+
               // Media list
               Expanded(
                 child: widget.isFetching && widget.media.isEmpty
                     ? _buildLoadingState()
                     : widget.errorMessage != null && widget.media.isEmpty
-                        ? _buildErrorState()
-                        : widget.media.isEmpty
-                            ? _buildEmptyState()
-                            : _buildMediaList(scrollController),
+                    ? _buildErrorState()
+                    : widget.media.isEmpty
+                    ? _buildEmptyState()
+                    : _buildMediaList(scrollController),
               ),
             ],
           ),
@@ -151,18 +160,12 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
           const SizedBox(height: 16),
           Text(
             'Fetching streams...',
-            style: TextStyle(
-              color: Colors.grey[600],
-              fontSize: 16,
-            ),
+            style: TextStyle(color: Colors.grey[600], fontSize: 16),
           ),
           const SizedBox(height: 8),
           Text(
             'This may take a few seconds',
-            style: TextStyle(
-              color: Colors.grey[500],
-              fontSize: 12,
-            ),
+            style: TextStyle(color: Colors.grey[500], fontSize: 12),
           ),
         ],
       ),
@@ -174,11 +177,7 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(
-            Icons.video_file,
-            size: 64,
-            color: Colors.grey[400],
-          ),
+          Icon(Icons.video_file, size: 64, color: Colors.grey[400]),
           const SizedBox(height: 16),
           Text(
             widget.isYouTube
@@ -207,19 +206,12 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              Icons.error_outline,
-              size: 64,
-              color: Colors.orange[400],
-            ),
+            Icon(Icons.error_outline, size: 64, color: Colors.orange[400]),
             const SizedBox(height: 16),
             Text(
               widget.errorMessage ?? 'An error occurred',
               textAlign: TextAlign.center,
-              style: TextStyle(
-                color: Colors.grey[700],
-                fontSize: 14,
-              ),
+              style: TextStyle(color: Colors.grey[700], fontSize: 14),
             ),
             const SizedBox(height: 20),
             ElevatedButton.icon(
@@ -227,7 +219,10 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
               icon: const Icon(Icons.refresh),
               label: const Text('Try Again'),
               style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 12,
+                ),
               ),
             ),
           ],
@@ -235,13 +230,15 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
       ),
     );
   }
-  
+
   /// Quick download bar - allows instant download of recommended quality
   Widget _buildQuickDownloadBar(BuildContext context) {
     // Find best video (prefer 720p non-DASH, or highest muxed)
-    final videos = widget.media.where((m) => m.type == MediaType.video).toList();
+    final videos = widget.media
+        .where((m) => m.type == MediaType.video)
+        .toList();
     DetectedMedia? bestVideo;
-    
+
     // Look for 720p first
     for (final v in videos) {
       if (v.quality?.contains('720') == true && !v.isDash) {
@@ -249,7 +246,7 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
         break;
       }
     }
-    
+
     // Fallback to highest non-DASH video
     if (bestVideo == null) {
       for (final v in videos) {
@@ -259,12 +256,12 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
         }
       }
     }
-    
+
     // Fallback to any video
     bestVideo ??= videos.isNotEmpty ? videos.first : null;
-    
+
     if (bestVideo == null) return const SizedBox.shrink();
-    
+
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: ElevatedButton.icon(
@@ -281,7 +278,7 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
       ),
     );
   }
-  
+
   void _quickDownload(BuildContext context, DetectedMedia media) {
     final downloadProvider = context.read<DownloadProvider>();
     downloadProvider.startDownload(media);
@@ -309,9 +306,11 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
 
   Widget _buildMediaList(ScrollController scrollController) {
     // Group media by type for better organization
-    final videos = widget.media.where((m) => m.type == MediaType.video).toList();
+    final videos = widget.media
+        .where((m) => m.type == MediaType.video)
+        .toList();
     final audio = widget.media.where((m) => m.type == MediaType.audio).toList();
-    
+
     return ListView(
       controller: scrollController,
       padding: const EdgeInsets.only(bottom: 16),
@@ -324,7 +323,9 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
         // Video section
         if (videos.isNotEmpty) ...[
           _buildSectionHeader('Video', Icons.movie, videos.length),
-          ...videos.map((m) => RepaintBoundary(child: _MediaListItem(media: m))),
+          ...videos.map(
+            (m) => RepaintBoundary(child: _MediaListItem(media: m)),
+          ),
         ],
         // Audio section
         if (audio.isNotEmpty) ...[
@@ -371,11 +372,13 @@ class _MediaListItemState extends State<_MediaListItem> {
   @override
   Widget build(BuildContext context) {
     final downloadProvider = context.read<DownloadProvider>();
-    
+
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       elevation: 0,
-      color: Theme.of(context).colorScheme.surfaceContainerHighest.withAlpha(128),
+      color: Theme.of(
+        context,
+      ).colorScheme.surfaceContainerHighest.withAlpha(128),
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
         onTap: _isDownloading ? null : () => _startDownload(downloadProvider),
@@ -386,7 +389,7 @@ class _MediaListItemState extends State<_MediaListItem> {
               // Thumbnail
               _buildThumbnail(),
               const SizedBox(width: 12),
-              
+
               // Info
               Expanded(
                 child: Column(
@@ -406,8 +409,7 @@ class _MediaListItemState extends State<_MediaListItem> {
                         _buildBadge(_getTypeLabel()),
                         if (widget.media.quality != null)
                           _buildBadge(widget.media.quality!, isPrimary: true),
-                        if (widget.media.fileSize != null)
-                          _buildSizeBadge(),
+                        if (widget.media.fileSize != null) _buildSizeBadge(),
                         if (widget.media.isDash)
                           _buildBadge('DASH', color: Colors.orange),
                       ],
@@ -415,9 +417,9 @@ class _MediaListItemState extends State<_MediaListItem> {
                   ],
                 ),
               ),
-              
+
               const SizedBox(width: 8),
-              
+
               // Download button
               _buildDownloadButton(downloadProvider),
             ],
@@ -452,8 +454,8 @@ class _MediaListItemState extends State<_MediaListItem> {
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
                         value: loadingProgress.expectedTotalBytes != null
-                            ? loadingProgress.cumulativeBytesLoaded / 
-                              loadingProgress.expectedTotalBytes!
+                            ? loadingProgress.cumulativeBytesLoaded /
+                                  loadingProgress.expectedTotalBytes!
                             : null,
                       ),
                     ),
@@ -467,11 +469,7 @@ class _MediaListItemState extends State<_MediaListItem> {
   }
 
   Widget _buildIcon() {
-    return Icon(
-      _getTypeIcon(),
-      color: _getTypeColor(),
-      size: 28,
-    );
+    return Icon(_getTypeIcon(), color: _getTypeColor(), size: 28);
   }
 
   Widget _buildDownloadButton(DownloadProvider downloadProvider) {
@@ -485,7 +483,7 @@ class _MediaListItemState extends State<_MediaListItem> {
         ),
       );
     }
-    
+
     return Material(
       color: Colors.green,
       borderRadius: BorderRadius.circular(20),
@@ -501,11 +499,14 @@ class _MediaListItemState extends State<_MediaListItem> {
     );
   }
 
-  void _startDownload(DownloadProvider downloadProvider) {
+  Future<void> _startDownload(DownloadProvider downloadProvider) async {
     setState(() => _isDownloading = true);
-    
-    downloadProvider.startDownload(widget.media);
-    
+
+    // Await to ensure background service is initialized before we potentially close
+    await downloadProvider.startDownload(widget.media);
+
+    if (!mounted) return;
+
     // Close sheet after short delay to show button state change
     Future.delayed(const Duration(milliseconds: 200), () {
       if (mounted) {

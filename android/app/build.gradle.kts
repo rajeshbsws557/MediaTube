@@ -9,12 +9,6 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
-// Use minimal FFmpeg package variant (much smaller than full-gpl)
-// Available variants: min, min-gpl, https, https-gpl, audio, video, full, full-gpl
-ext {
-    set("ffmpegKitPackage", "min")  // Minimal version is sufficient for video/audio merging
-}
-
 android {
     namespace = "com.rajesh.mediatube"
     compileSdk = flutter.compileSdkVersion
@@ -27,9 +21,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
-    }
+    // compilerOptions removed from here
+
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
@@ -107,6 +100,38 @@ android {
                 "META-INF/*.kotlin_module"
             )
         }
+    }
+
+    // kotlinOptions removed; configured globally below
+    
+    // Auto-copy split APKs to the Flutter output directory
+    applicationVariants.all {
+         if (name == "release") {
+             val variant = this
+             outputs.all {
+                 val output = this
+                 val outputFile = output.outputFile
+                 if (outputFile != null && outputFile.name.endsWith(".apk")) {
+                     val flutterOutput = rootProject.file("../build/app/outputs/flutter-apk")
+                     // Use assembleProvider.get().doLast to run AFTER build
+                     variant.assembleProvider.get().doLast {
+                         if (!flutterOutput.exists()) flutterOutput.mkdirs()
+                         copy {
+                             from(outputFile)
+                             into(flutterOutput)
+                         }
+                         println("✅ Copied ${outputFile.name} to ${flutterOutput.absolutePath}")
+                     }
+                 }
+             }
+         }
+    }
+}
+
+// Global configuration for Kotlin tasks - correct place for compilerOptions
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 

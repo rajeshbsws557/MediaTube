@@ -394,7 +394,7 @@ class _DownloadItem extends StatelessWidget {
             ),
             IconButton(
               icon: const Icon(Icons.delete_outline, color: Colors.red),
-              onPressed: () => provider.removeDownload(task.id),
+              onPressed: () => provider.deleteHistoryItem(task.id),
             ),
           ],
         );
@@ -408,7 +408,7 @@ class _DownloadItem extends StatelessWidget {
       case DownloadStatus.cancelled:
         return IconButton(
           icon: const Icon(Icons.delete_outline, color: Colors.red),
-          onPressed: () => provider.removeDownload(task.id),
+          onPressed: () => provider.deleteHistoryItem(task.id),
         );
     }
   }

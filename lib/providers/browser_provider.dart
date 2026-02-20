@@ -31,6 +31,9 @@ class BrowserProvider extends ChangeNotifier {
   static final Map<String, List<DetectedMedia>> _streamCache = {};
   static const int _maxCacheSize = 50; // Increased cache for more videos
 
+  // Share Intent Support - queue to handle rapid successive shares
+  final List<String> _pendingUrls = [];
+
   // Getters
   String get currentUrl => _currentUrl;
   String get pageTitle => _pageTitle;
@@ -43,6 +46,21 @@ class BrowserProvider extends ChangeNotifier {
   bool get isFetchingYouTube => _isFetchingYouTube;
   String? get fetchError => _fetchError;
   bool get hasFetchError => _fetchError != null;
+  /// Returns the next pending URL or null if the queue is empty.
+  String? get pendingUrl => _pendingUrls.isNotEmpty ? _pendingUrls.first : null;
+
+  void setPendingUrl(String url) {
+    _pendingUrls.add(url);
+    notifyListeners();
+  }
+
+  void consumePendingUrl() {
+    if (_pendingUrls.isNotEmpty) {
+      _pendingUrls.removeAt(0);
+    }
+    // Don't call notifyListeners here to avoid recursive listener loops.
+    // The caller is responsible for proceeding after consuming.
+  }
 
   void setLoading(bool loading) {
     _isLoading = loading;
@@ -50,6 +68,10 @@ class BrowserProvider extends ChangeNotifier {
   }
 
   void setCurrentUrl(String url) {
+    // Skip if URL hasn't changed (prevents redundant processing from
+    // multiple WebView callbacks firing for the same navigation)
+    if (url == _currentUrl) return;
+
     _currentUrl = url;
 
     // Check if this is a YouTube page
@@ -222,7 +244,8 @@ class BrowserProvider extends ChangeNotifier {
   /// Called when page finishes loading
   void onPageFinished(String url) {
     setLoading(false);
-    setCurrentUrl(url);
+    // Don't call setCurrentUrl here — onUpdateVisitedHistory handles it
+    // Calling it again would trigger duplicate stream fetching
   }
 
   @override

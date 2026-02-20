@@ -4,6 +4,19 @@
   <img src="screenshots/icon.png" width="120" alt="MediaTube Logo">
 </p>
 
+# ⚠️ Legal Disclaimer
+
+**This application is for educational purposes only.** 
+
+1. **Personal Use Only**: Do not use this tool to distribute copyrighted content.
+2. **Respect Terms of Service**: You must comply with the ToS of any platform (YouTube, Instagram, etc.) you access.
+3. **Anti-Piracy**: This app is protected by signature verification. **Do not clone, re-upload, or sell this application.** Any modified versions may not function correctly.
+4. **No Warranties**: The developers are not responsible for any misuse or damages caused by this software.
+
+---
+
+# MediaTube
+
 A Flutter Android app with browser and media downloading capabilities. Download videos from YouTube and other websites.
 
 ## Features
@@ -124,11 +137,13 @@ The APK will be at `build/app/outputs/flutter-apk/app-release.apk`
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Copyright (c) 2026 Rajesh Biswas. All Rights Reserved.
+
+This application and its source code are the proprietary property of Rajesh Biswas. You may not use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software without explicit prior written permission from the author.
 
 ## Disclaimer
 
-This app is for personal use only. Respect copyright laws and the terms of service of websites you visit. The developers are not responsible for any misuse of this application.
+This app is for personal use only. Respect copyright laws and the terms of service of websites you visit. The developers are not responsible for any misuse of this application. **Copying or modifying the source code is strictly prohibited.**
 
 ## Acknowledgments
 

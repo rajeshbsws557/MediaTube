@@ -1,7 +1,7 @@
 # MediaTube
 
 <p align="center">
-  <img src="screenshots/icon.png" width="120" alt="MediaTube Logo">
+  <img src="assets/icon.png" width="120" alt="MediaTube Logo">
 </p>
 
 # ⚠️ Legal Disclaimer

@@ -27,7 +27,7 @@ class DownloadService {
   String? _downloadPath;
 
   // Headers required for YouTube downloads
-  static const Map<String, String> _defaultHeaders = {
+  static const Map<String, String> defaultHeaders = {
     // Keep the Pixel 7 User-Agent
     'User-Agent':
         'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
@@ -344,7 +344,7 @@ class DownloadService {
     try {
       final headResponse = await _dio.head(
         task.url,
-        options: Options(headers: _defaultHeaders),
+        options: Options(headers: defaultHeaders),
       );
       final contentLength = headResponse.headers.value('content-length');
       if (contentLength != null) {
@@ -360,7 +360,7 @@ class DownloadService {
         downloadedBytes < task.totalBytes) {
       // Resume download - use streaming to append to existing file
       debugPrint('Resuming download from $downloadedBytes bytes');
-      final headers = Map<String, dynamic>.from(_defaultHeaders);
+      final headers = Map<String, dynamic>.from(defaultHeaders);
       headers['Range'] = 'bytes=$downloadedBytes-';
 
       final response = await _dio.get<ResponseBody>(
@@ -397,7 +397,7 @@ class DownloadService {
         task.url,
         tempPath,
         cancelToken: cancelToken,
-        options: Options(headers: _defaultHeaders),
+        options: Options(headers: defaultHeaders),
         deleteOnError: false,
         onReceiveProgress: (received, total) {
           if (_pausedDownloads[task.id] == true) {

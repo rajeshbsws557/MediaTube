@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 import '../config/app_config.dart';
 import '../models/detected_media.dart';
 import '../models/download_task.dart';
+import 'download_service.dart';
 import 'ffmpeg_service.dart';
 import 'native_youtube_service.dart';
 
@@ -35,8 +36,7 @@ class BackendDownloadService {
   Timer? _progressTimer;
 
   // Parallel download settings for FAST downloads
-  static const int _parallelChunks =
-      4; // Reduced from 8 to prevent thread contention on mobile
+  static const int _parallelChunks = 8;
   static const int _minChunkSize = 1024 * 1024; // 1MB minimum chunk size
 
   BackendDownloadService()
@@ -558,10 +558,7 @@ class BackendDownloadService {
       BaseOptions(
         connectTimeout: const Duration(seconds: 30),
         receiveTimeout: const Duration(minutes: 30),
-        headers: {
-          'User-Agent':
-              'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        },
+        headers: DownloadService.defaultHeaders,
       ),
     );
 
@@ -580,12 +577,13 @@ class BackendDownloadService {
       debugPrint('HEAD request failed, trying GET: $e');
       // Fallback: do a range request to check
       try {
+        final headers = Map<String, dynamic>.from(
+          DownloadService.defaultHeaders,
+        );
+        headers['Range'] = 'bytes=0-0';
         final rangeResponse = await dio.get(
           url,
-          options: Options(
-            headers: {'Range': 'bytes=0-0'},
-            responseType: ResponseType.bytes,
-          ),
+          options: Options(headers: headers, responseType: ResponseType.bytes),
         );
         if (rangeResponse.statusCode == 206) {
           supportsRange = true;
@@ -700,15 +698,17 @@ class BackendDownloadService {
         }
 
         // Only download if not complete
+        final chunkHeaders = Map<String, dynamic>.from(
+          DownloadService.defaultHeaders,
+        );
+        chunkHeaders['Range'] =
+            'bytes=${chunk.start + initialBytes}-${chunk.end}';
+
         final chunkDio = Dio(
           BaseOptions(
             connectTimeout: const Duration(seconds: 30),
             receiveTimeout: const Duration(minutes: 10),
-            headers: {
-              'User-Agent':
-                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-              'Range': 'bytes=${chunk.start + initialBytes}-${chunk.end}',
-            },
+            headers: chunkHeaders,
           ),
         );
 

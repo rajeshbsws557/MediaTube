@@ -154,6 +154,21 @@ class YouTubeService {
       // 1. BEST AUDIO
       final bestAudio = manifest.audioOnly.withHighestBitrate();
 
+      // Ensure we have a valid video duration for size estimation if needed
+      final durationSeconds = video.duration?.inSeconds ?? 0;
+
+      // Helper to calculate estimated size if totalBytes is 0
+      int estimateSize(StreamInfo info) {
+        if (info.size.totalBytes > 0) return info.size.totalBytes;
+        if (durationSeconds > 0) {
+          // bitrate is bits per second. Divide by 8 for bytes
+          return (info.bitrate.bitsPerSecond * durationSeconds / 8).round();
+        }
+        return 0; // Unknown
+      }
+
+      final bestAudioSize = estimateSize(bestAudio);
+
       // 2. ROBUST VIDEO SELECTION (Fix for hanging 1080p)
       final dashByResolution = <String, VideoOnlyStreamInfo>{};
 
@@ -179,6 +194,7 @@ class YouTubeService {
       // Add High-Res DASH streams (marked for backend download)
       for (final res in dashByResolution.keys) {
         final stream = dashByResolution[res]!;
+        final streamSize = estimateSize(stream);
 
         // Log to debug what we picked (Expect itag 137 for 1080p)
         debugPrint(
@@ -192,7 +208,9 @@ class YouTubeService {
             type: MediaType.video,
             source: MediaSource.youtube,
             thumbnailUrl: thumbnails,
-            fileSize: stream.size.totalBytes + bestAudio.size.totalBytes,
+            fileSize: (streamSize > 0 && bestAudioSize > 0)
+                ? streamSize + bestAudioSize
+                : null,
             quality: '$res (HD)',
             format: 'mp4',
             isDash: true,
@@ -210,6 +228,8 @@ class YouTubeService {
         if (height < 360) continue;
         if (dashByResolution.containsKey('${height}p')) continue;
 
+        final streamSize = estimateSize(stream);
+
         mediaList.add(
           DetectedMedia(
             url: stream.url.toString(),
@@ -217,8 +237,10 @@ class YouTubeService {
             type: MediaType.video,
             source: MediaSource.youtube,
             thumbnailUrl: thumbnails,
-            fileSize: stream.size.totalBytes,
-            quality: '$height', // Simple quality label
+            fileSize: streamSize > 0 ? streamSize : null,
+            quality: height >= 720
+                ? '${height}p (HD)'
+                : '${height}p', // HD label
             format: 'mp4',
             isDash: false,
             videoId: videoId,
@@ -235,7 +257,7 @@ class YouTubeService {
           type: MediaType.audio,
           source: MediaSource.youtube,
           thumbnailUrl: thumbnails,
-          fileSize: bestAudio.size.totalBytes,
+          fileSize: bestAudioSize > 0 ? bestAudioSize : null,
           quality: 'Audio (${bestAudio.bitrate.kiloBitsPerSecond.toInt()}kbps)',
           format: 'm4a',
           isDash: false,

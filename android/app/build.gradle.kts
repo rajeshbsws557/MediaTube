@@ -104,27 +104,37 @@ android {
 
     // kotlinOptions removed; configured globally below
     
-    // Auto-copy split APKs to the Flutter output directory
+    // Auto-copy APKs to Flutter's expected output directory for all variants.
+    // This keeps `flutter build apk` artifact discovery working when ABI splits are enabled.
     applicationVariants.all {
-         if (name == "release") {
-             val variant = this
-             outputs.all {
-                 val output = this
-                 val outputFile = output.outputFile
-                 if (outputFile != null && outputFile.name.endsWith(".apk")) {
-                     val flutterOutput = rootProject.file("../build/app/outputs/flutter-apk")
-                     // Use assembleProvider.get().doLast to run AFTER build
-                     variant.assembleProvider.get().doLast {
-                         if (!flutterOutput.exists()) flutterOutput.mkdirs()
-                         copy {
-                             from(outputFile)
-                             into(flutterOutput)
-                         }
-                         println("✅ Copied ${outputFile.name} to ${flutterOutput.absolutePath}")
-                     }
-                 }
-             }
-         }
+        val variant = this
+        val variantName = variant.name
+        val flutterOutput = rootProject.file("../build/app/outputs/flutter-apk")
+        val variantApkDir = rootProject.file("app/build/outputs/apk/$variantName")
+
+        variant.assembleProvider.get().doLast {
+            if (!flutterOutput.exists()) {
+                flutterOutput.mkdirs()
+            }
+
+            // Copy all split APKs for this variant.
+            copy {
+                from(variantApkDir)
+                include("*.apk")
+                into(flutterOutput)
+            }
+
+            // Also provide the canonical app-<variant>.apk expected by Flutter tooling.
+            val universalApk = file("$variantApkDir/app-universal-$variantName.apk")
+            if (universalApk.exists()) {
+                copy {
+                    from(universalApk)
+                    into(flutterOutput)
+                    rename { "app-$variantName.apk" }
+                }
+                println("✅ Copied app-$variantName.apk to ${flutterOutput.absolutePath}")
+            }
+        }
     }
 }
 

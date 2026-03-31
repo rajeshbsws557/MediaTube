@@ -57,11 +57,36 @@ class BackendDownloadService {
 
   /// Set the backend server URL (for fallback mode)
   static void setServerUrl(String url) {
-    _serverUrl = url.endsWith('/') ? url.substring(0, url.length - 1) : url;
+    final normalized =
+        url.endsWith('/') ? url.substring(0, url.length - 1) : url;
+    final uri = Uri.tryParse(normalized);
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+      debugPrint('Rejected invalid backend URL: $url');
+      return;
+    }
+
+    final scheme = uri.scheme.toLowerCase();
+    final allowHttp = kDebugMode;
+    if (scheme != 'https' && !(allowHttp && scheme == 'http')) {
+      debugPrint('Rejected insecure backend URL in current build mode');
+      return;
+    }
+
+    _serverUrl = normalized;
   }
 
   /// Get current server URL
   static String get serverUrl => _serverUrl;
+
+  bool _isSafeNetworkUrl(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+      return false;
+    }
+
+    final scheme = uri.scheme.toLowerCase();
+    return scheme == 'http' || scheme == 'https';
+  }
 
   /// Check if extraction is available (native or server)
   Future<bool> isExtractionAvailable() async {
@@ -73,6 +98,10 @@ class BackendDownloadService {
 
   /// Check if the backend server is available (fallback)
   Future<bool> isServerAvailable() async {
+    if (!_isSafeNetworkUrl(_serverUrl)) {
+      return false;
+    }
+
     try {
       final response = await _dio.get(
         '$_serverUrl/health',
@@ -87,6 +116,10 @@ class BackendDownloadService {
 
   /// Get server info including yt-dlp version (fallback only)
   Future<Map<String, dynamic>?> getServerInfo() async {
+    if (!_isSafeNetworkUrl(_serverUrl)) {
+      return null;
+    }
+
     try {
       final response = await _dio.get('$_serverUrl/health');
       if (response.statusCode == 200) {
@@ -101,6 +134,11 @@ class BackendDownloadService {
   /// Get video info and available formats from YouTube
   /// Uses native on-device extraction by default, with server fallback
   Future<BackendVideoInfo?> getVideoInfo(String url) async {
+    if (!_isSafeNetworkUrl(url)) {
+      debugPrint('Rejected unsafe media URL for extraction');
+      return null;
+    }
+
     // Try native extraction first
     if (_useNativeExtraction) {
       try {
@@ -188,8 +226,9 @@ class BackendDownloadService {
 
       // Check if this quality exists in formats
       final hasQuality = info.formats?.any((f) => f.height == height) ?? false;
-      if (!hasQuality && height > 720)
+      if (!hasQuality && height > 720) {
         continue; // Only show higher qualities if available
+      }
 
       int estimatedSize = _estimateFileSize(info.duration ?? 0, height);
 
@@ -267,6 +306,11 @@ class BackendDownloadService {
   /// Get direct URLs for client-side download (FAST!)
   /// Uses native extraction by default, with server fallback
   Future<DirectUrls?> getDirectUrls(String url, String quality) async {
+    if (!_isSafeNetworkUrl(url)) {
+      debugPrint('Rejected unsafe media URL for direct extraction');
+      return null;
+    }
+
     // Try native extraction first
     if (_useNativeExtraction) {
       try {
@@ -432,7 +476,11 @@ class BackendDownloadService {
       debugPrint(stack.toString());
       task.status = DownloadStatus.failed;
       task.error = e.toString();
-      onError?.call(task);
+      if (onError != null) {
+        onError(task);
+        return;
+      }
+      rethrow;
     }
   }
 
@@ -447,6 +495,10 @@ class BackendDownloadService {
     Function(DownloadTask)? onError,
     BackendCancelToken? cancelToken,
   }) async {
+    if (!_isSafeNetworkUrl(url)) {
+      throw Exception('Blocked unsafe URL scheme');
+    }
+
     try {
       if (cancelToken?.isCancelled == true) {
         task.status = DownloadStatus.paused;
@@ -459,7 +511,7 @@ class BackendDownloadService {
       task.statusMessage = 'Downloading audio...';
       onProgress?.call(task);
 
-      debugPrint('🎵 Direct URL download: $url');
+      debugPrint('🎵 Direct URL download started');
 
       // Ensure parent directory exists
       final downloadDir = Directory(p.dirname(savePath));
@@ -507,7 +559,11 @@ class BackendDownloadService {
       debugPrint(stack.toString());
       task.status = DownloadStatus.failed;
       task.error = e.toString();
-      onError?.call(task);
+      if (onError != null) {
+        onError(task);
+        return;
+      }
+      rethrow;
     }
   }
 
@@ -548,6 +604,10 @@ class BackendDownloadService {
     BackendCancelToken? cancelToken,
     int chunks = _parallelChunks,
   }) async {
+    if (!_isSafeNetworkUrl(url)) {
+      throw Exception('Blocked unsafe URL scheme');
+    }
+
     debugPrint('🚀 Starting parallel download with $chunks connections');
 
     // Check cancellation early
@@ -629,11 +689,15 @@ class BackendDownloadService {
     final tempDir = p.join(p.dirname(savePath), '.temp_chunks_$pathHash');
     await Directory(tempDir).create(recursive: true);
 
+    final adaptiveChunks = totalSize > 0
+        ? max(2, min(chunks, (totalSize / (4 * 1024 * 1024)).ceil()))
+        : chunks;
+
     // Calculate chunk sizes
-    final chunkSize = (totalSize / chunks).ceil();
+    final chunkSize = (totalSize / adaptiveChunks).ceil();
     final List<_ChunkInfo> chunkInfos = [];
 
-    for (int i = 0; i < chunks; i++) {
+    for (int i = 0; i < adaptiveChunks; i++) {
       final start = i * chunkSize;
       final end = min((i + 1) * chunkSize - 1, totalSize - 1);
       if (start < totalSize) {
@@ -684,11 +748,12 @@ class BackendDownloadService {
             updateProgress();
             return chunkPath;
           } else if (existingSize < expectedSize) {
-            // Partial chunk found, resume from there
-            initialBytes = existingSize;
+            // Partial chunk found. Restart this chunk to avoid overwrite corruption.
             debugPrint(
-              '🔄 Resuming chunk ${chunk.index} from $initialBytes bytes',
+              '🔄 Restarting partial chunk ${chunk.index} ($existingSize/$expectedSize)',
             );
+            await chunkFile.delete();
+            initialBytes = 0;
           } else {
             // Corrupt (larger than expected), restart chunk
             debugPrint('⚠️ Chunk ${chunk.index} corrupt, restarting');
@@ -751,23 +816,6 @@ class BackendDownloadService {
         } finally {
           chunkDio.close();
         }
-
-        // If we did a partial download (resume), we need to append?
-        // Actually, Dio download writes to file. If we used Range header for remainder,
-        // Dio writes ONLY the remainder to file.
-        // If we resumed, we likely need to append the new bytes to the old file.
-        // BUT Dio download overwrites.
-        // FIX: For simplicity and stability in this "Fast Fix" phase:
-        // We will simple let Dio download to a .part file for the remainder,
-        // and then append it to the main chunk file if needed.
-        // OR: Since we passed start+initialBytes, we are downloading the REST.
-        // If initialBytes > 0, we must append manually.
-        // If we lack complex stream logic here, it's safer to just overwrite partial chunks for now to guarantee correctness,
-        // UNLESS we implement robust stream appending.
-        // Given complexity: I will stick to "Resume only if full chunk exists" or simple overwrite for partials to avoid corruption bugs.
-        // Ideally: Appending is best.
-        // Compromise for speed: If chunk exists and is valid size -> Skip.
-        // If partial -> Overwrite (restart chunk). This is still much better than restarting WHOLE file.
 
         return chunkPath;
       }).toList();
@@ -870,8 +918,8 @@ class BackendDownloadService {
     final videoPath = p.join(dir, '${baseName}_video.$videoExt');
     final audioPath = p.join(dir, '${baseName}_audio.$audioExt');
 
-    debugPrint('📥 FAST downloading video to: $videoPath');
-    debugPrint('📥 FAST downloading audio to: $audioPath');
+    debugPrint('📥 FAST downloading video stream');
+    debugPrint('📥 FAST downloading audio stream');
 
     int videoSize = 0;
     int audioSize = 0;

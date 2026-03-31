@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:open_filex/open_filex.dart';
 import 'dart:io';
+import 'package:share_plus/share_plus.dart';
 import '../models/models.dart';
 import '../providers/providers.dart';
 
@@ -430,10 +431,16 @@ class _DownloadItem extends StatelessWidget {
   }
 
   void _shareFile(BuildContext context, String path) async {
-    // For now, just show the file path
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('File saved at: $path')));
+    final file = File(path);
+    if (await file.exists()) {
+      Share.shareXFiles([
+        XFile(path),
+      ], text: 'Check out this media file downloaded from MediaTube!');
+    } else if (context.mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('File not found to share')));
+    }
   }
 
   void _showDeleteDialog(BuildContext context, DownloadProvider provider) {
@@ -676,7 +683,7 @@ class _CompletedDownloadsTab extends StatelessWidget {
       selector: (_, p) => p.completedDownloads,
       shouldRebuild: (prev, next) => prev.length != next.length,
       builder: (context, downloads, _) {
-        return _buildDownloadsList(
+        return _buildGroupedDownloadsList(
           downloads,
           emptyMessage: 'No completed downloads',
           emptyIcon: Icons.check_circle_outline,
@@ -690,20 +697,36 @@ class _CompletedDownloadsTab extends StatelessWidget {
 class _HistoryDownloadsTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-    // Use Consumer for history to see active download progress
-    return Consumer<DownloadProvider>(
-      builder: (context, provider, _) {
-        return _buildDownloadsList(
+    // Rebuild history list for structure/status changes, while per-item
+    // progress updates remain granular via ValueListenableBuilder.
+    return Selector<DownloadProvider, List<String>>(
+      selector: (_, provider) => provider.allDownloadsHistory
+          .map(
+            (d) =>
+                '${d.id}:${d.status.index}:${d.fileName}:${d.completedAt?.millisecondsSinceEpoch ?? 0}',
+          )
+          .toList(),
+      shouldRebuild: (prev, next) {
+        if (prev.length != next.length) return true;
+        for (int i = 0; i < prev.length; i++) {
+          if (prev[i] != next[i]) return true;
+        }
+        return false;
+      },
+      builder: (context, _, __) {
+        final provider = context.read<DownloadProvider>();
+        return _buildGroupedDownloadsList(
           provider.allDownloadsHistory,
           emptyMessage: 'No download history',
           emptyIcon: Icons.history,
+          useProgressNotifier: true,
         );
       },
     );
   }
 }
 
-/// Shared download list builder
+/// Shared single download list builder (used by Active tab)
 Widget _buildDownloadsList(
   List<DownloadTask> downloads, {
   required String emptyMessage,
@@ -726,22 +749,174 @@ Widget _buildDownloadsList(
     );
   }
 
-  return ListView.builder(
+  return ListView.separated(
     itemCount: downloads.length,
     cacheExtent: 500,
-    addAutomaticKeepAlives:
-        false, // Performance: don't keep items alive when scrolled out
-    addRepaintBoundaries: true, // Performance: isolate repaints
+    addAutomaticKeepAlives: false,
+    addRepaintBoundaries: true,
     physics: const BouncingScrollPhysics(
       parent: AlwaysScrollableScrollPhysics(),
     ),
+    separatorBuilder: (context, index) => const SizedBox(height: 2),
     itemBuilder: (context, index) {
+      final task = downloads[index];
       return RepaintBoundary(
-        child: _DownloadItem(
-          task: downloads[index],
-          useProgressNotifier: useProgressNotifier,
+        child: Dismissible(
+          key: Key(task.id),
+          direction: DismissDirection.horizontal,
+          background: _buildSwipeBackground(
+            color: Colors.amber,
+            icon: task.status == DownloadStatus.paused
+                ? Icons.play_arrow
+                : Icons.pause,
+            alignment: Alignment.centerLeft,
+          ),
+          secondaryBackground: _buildSwipeBackground(
+            color: Colors.red,
+            icon: Icons.delete,
+            alignment: Alignment.centerRight,
+          ),
+          confirmDismiss: (direction) async {
+            final provider = context.read<DownloadProvider>();
+            if (direction == DismissDirection.endToStart) {
+              // Right to left -> Delete
+              provider.deleteHistoryItem(task.id);
+              return true;
+            } else if (direction == DismissDirection.startToEnd) {
+              // Left to right -> Pause/Resume
+              if (task.status == DownloadStatus.downloading) {
+                provider.pauseDownload(task.id);
+              } else if (task.status == DownloadStatus.paused) {
+                provider.resumeDownload(task.id);
+              }
+              return false; // Don't actually dismiss the item for pause/resume
+            }
+            return false;
+          },
+          child: _DownloadItem(
+            task: task,
+            useProgressNotifier: useProgressNotifier,
+          ),
         ),
       );
     },
+  );
+}
+
+Widget _buildSwipeBackground({
+  required Color color,
+  required IconData icon,
+  required Alignment alignment,
+}) {
+  return Container(
+    margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+    decoration: BoxDecoration(
+      color: color,
+      borderRadius: BorderRadius.circular(12),
+    ),
+    alignment: alignment,
+    padding: const EdgeInsets.symmetric(horizontal: 20),
+    child: Icon(icon, color: Colors.white, size: 30),
+  );
+}
+
+/// Shared grouped download list builder (used by Completed and History tabs)
+Widget _buildGroupedDownloadsList(
+  List<DownloadTask> downloads, {
+  required String emptyMessage,
+  required IconData emptyIcon,
+  bool useProgressNotifier = false,
+}) {
+  if (downloads.isEmpty) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(emptyIcon, size: 64, color: Colors.grey[400]),
+          const SizedBox(height: 16),
+          Text(
+            emptyMessage,
+            style: TextStyle(color: Colors.grey[600], fontSize: 16),
+          ),
+        ],
+      ),
+    );
+  }
+
+  final videoTasks = <DownloadTask>[];
+  final audioTasks = <DownloadTask>[];
+  for (final task in downloads) {
+    if (task.isAudioOnly) {
+      audioTasks.add(task);
+    } else {
+      videoTasks.add(task);
+    }
+  }
+
+  return CustomScrollView(
+    physics: const BouncingScrollPhysics(
+      parent: AlwaysScrollableScrollPhysics(),
+    ),
+    slivers: [
+      if (videoTasks.isNotEmpty) ...[
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.only(
+              left: 16,
+              top: 16,
+              bottom: 8,
+              right: 16,
+            ),
+            child: Text(
+              'Videos (${videoTasks.length})',
+              style: const TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+                color: Colors.blue,
+              ),
+            ),
+          ),
+        ),
+        SliverList(
+          delegate: SliverChildBuilderDelegate((context, index) {
+            final task = videoTasks[index];
+            return _DownloadItem(
+              task: task,
+              useProgressNotifier: useProgressNotifier,
+            );
+          }, childCount: videoTasks.length),
+        ),
+      ],
+      if (audioTasks.isNotEmpty) ...[
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: EdgeInsets.only(
+              left: 16,
+              top: videoTasks.isNotEmpty ? 24 : 16,
+              bottom: 8,
+              right: 16,
+            ),
+            child: Text(
+              'Audio (${audioTasks.length})',
+              style: const TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+                color: Colors.purple,
+              ),
+            ),
+          ),
+        ),
+        SliverList(
+          delegate: SliverChildBuilderDelegate((context, index) {
+            final task = audioTasks[index];
+            return _DownloadItem(
+              task: task,
+              useProgressNotifier: useProgressNotifier,
+            );
+          }, childCount: audioTasks.length),
+        ),
+      ],
+      const SliverToBoxAdapter(child: SizedBox(height: 32)), // Bottom padding
+    ],
   );
 }

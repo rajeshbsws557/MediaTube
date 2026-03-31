@@ -66,6 +66,15 @@ class NativeDownloader(private val context: Context, flutterEngine: FlutterEngin
                     val fileName = call.argument<String>("fileName") ?: "download"
                     val taskId = call.argument<String>("taskId") ?: ""
                     val cookies = call.argument<String>("cookies")
+
+                    if (!isSafeHttpUrl(url)) {
+                        result.error(
+                            "INVALID_URL",
+                            "Only http/https URLs with a valid host are allowed",
+                            null
+                        )
+                        return@setMethodCallHandler
+                    }
                     
                     try {
                         val downloadId = startDownload(url, fileName, taskId, cookies)
@@ -99,16 +108,27 @@ class NativeDownloader(private val context: Context, flutterEngine: FlutterEngin
     }
     
     private fun startDownload(url: String, fileName: String, taskId: String, cookies: String?): Long {
+        if (!isSafeHttpUrl(url)) {
+            throw IllegalArgumentException("Blocked unsafe URL scheme")
+        }
+
         val downloadDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "MediaTube")
         if (!downloadDir.exists()) {
             downloadDir.mkdirs()
         }
-        
-        val destinationFile = File(downloadDir, fileName)
+
+        val safeFileName = sanitizeFileName(fileName)
+        val destinationFile = File(downloadDir, safeFileName).canonicalFile
+        val canonicalDownloadDir = downloadDir.canonicalFile
+        val expectedPrefix = canonicalDownloadDir.path + File.separator
+        if (!destinationFile.path.startsWith(expectedPrefix)) {
+            throw IllegalArgumentException("Invalid destination file path")
+        }
+
         val savePath = destinationFile.absolutePath
         
         val request = DownloadManager.Request(Uri.parse(url)).apply {
-            setTitle(fileName)
+            setTitle(safeFileName)
             setDescription("Downloading via MediaTube")
             setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
             setDestinationUri(Uri.fromFile(destinationFile))
@@ -131,9 +151,31 @@ class NativeDownloader(private val context: Context, flutterEngine: FlutterEngin
         }
         
         val downloadId = downloadManager.enqueue(request)
-        activeDownloads[downloadId] = DownloadInfo(taskId, fileName, savePath)
+        activeDownloads[downloadId] = DownloadInfo(taskId, safeFileName, savePath)
         
         return downloadId
+    }
+
+    private fun isSafeHttpUrl(rawUrl: String): Boolean {
+        val uri = try {
+            Uri.parse(rawUrl)
+        } catch (_: Exception) {
+            return false
+        }
+
+        val scheme = uri.scheme?.lowercase()
+        val host = uri.host
+        return (scheme == "http" || scheme == "https") && !host.isNullOrBlank()
+    }
+
+    private fun sanitizeFileName(rawName: String): String {
+        val sanitized = rawName
+            .replace(Regex("[<>:\"/\\\\|?*\\u0000-\\u001F]"), "_")
+            .replace(Regex("\\s+"), "_")
+            .trim('_')
+
+        val safe = if (sanitized.isBlank()) "download" else sanitized
+        return if (safe.length > 120) safe.substring(0, 120) else safe
     }
     
     private fun getProgress(downloadId: Long): Map<String, Any> {

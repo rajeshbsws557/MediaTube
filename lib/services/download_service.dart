@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../models/models.dart';
 import 'backend_download_service.dart';
 import 'dart:async';
@@ -11,9 +12,9 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 
 /// Service to manage file downloads with pause/resume support
 class DownloadService {
-  final Dio _dio = Dio();
+  final Dio _dio;
 
-  final BackendDownloadService _backendService = BackendDownloadService();
+  final BackendDownloadService _backendService;
   final Map<String, CancelToken> _cancelTokens = {};
   final Map<String, BackendCancelToken> _backendCancelTokens = {};
   final Map<String, bool> _pausedDownloads = {}; // Track paused state
@@ -25,6 +26,12 @@ class DownloadService {
 
   // Download directory
   String? _downloadPath;
+
+  DownloadService({
+    Dio? dio,
+    BackendDownloadService? backendService,
+  }) : _dio = dio ?? Dio(),
+       _backendService = backendService ?? BackendDownloadService();
 
   // Headers required for YouTube downloads
   static const Map<String, String> defaultHeaders = {
@@ -110,6 +117,7 @@ class DownloadService {
       audioUrl: media.audioUrl,
       requiresMerge:
           media.isDash && media.audioUrl != null && !media.useBackend,
+      isAudioOnly: media.type == MediaType.audio,
       status: DownloadStatus.pending,
     );
   }
@@ -149,6 +157,13 @@ class DownloadService {
     Function(DownloadTask)? onComplete,
     Function(DownloadTask)? onError,
   }) async {
+    if (!_isSafeNetworkUrl(task.url)) {
+      task.status = DownloadStatus.failed;
+      task.error = 'Blocked unsafe URL scheme';
+      onError?.call(task);
+      return;
+    }
+
     final cancelToken = CancelToken();
     _cancelTokens[task.id] = cancelToken;
     _pausedDownloads[task.id] = false;
@@ -168,7 +183,63 @@ class DownloadService {
 
     try {
       if (media.source == MediaSource.youtube) {
-        if (media.useBackend == false && media.url.isNotEmpty) {
+        if (media.type == MediaType.audio && media.useBackend == false) {
+          final canUseDirectAudio = _looksLikeDirectMediaUrl(media.url);
+          if (canUseDirectAudio) {
+            try {
+              // Audio-only streams from youtube_explode may already contain direct CDN URLs.
+              debugPrint('🎵 Direct audio download (using existing CDN URL)');
+              await _backendService.downloadDirectFromUrl(
+                task,
+                media.url,
+                savePath: task.savePath,
+                onProgress: (t) {
+                  _updateNotification(
+                    'Downloading ${media.title}',
+                    '${(t.progress * 100).toInt()}%',
+                    t.progress,
+                  );
+                  onProgress?.call(t);
+                },
+                onComplete: (t) {
+                  _cleanup(task.id);
+                  onComplete?.call(t);
+                },
+                cancelToken: backendCancelToken,
+              );
+              return;
+            } catch (e) {
+              debugPrint(
+                '⚠️ Direct audio URL failed (possibly expired), switching to extractor flow: $e',
+              );
+            }
+          }
+
+          final backendMedia = _normalizeYouTubeMediaForBackend(media);
+          debugPrint('🌐 Using backend/native extractor for audio download');
+          await _backendService.downloadDirect(
+            task,
+            backendMedia,
+            savePath: task.savePath,
+            onProgress: (t) {
+              _updateNotification(
+                'Downloading ${media.title}',
+                '${(t.progress * 100).toInt()}%',
+                t.progress,
+              );
+              onProgress?.call(t);
+            },
+            onComplete: (t) {
+              _cleanup(task.id);
+              onComplete?.call(t);
+            },
+            onError: (t) {
+              _cleanup(task.id);
+              onError?.call(t);
+            },
+            cancelToken: backendCancelToken,
+          );
+        } else if (media.useBackend == false && media.url.isNotEmpty) {
           // Audio-only streams: already have direct CDN URL from youtube_explode
           // Use backend's fast parallel download engine, skip URL re-extraction
           debugPrint('🎵 Direct audio download (skipping re-extraction)');
@@ -266,6 +337,48 @@ class DownloadService {
     }
   }
 
+  bool _isSafeNetworkUrl(String url) {
+    try {
+      final uri = Uri.parse(url);
+      if (!uri.hasScheme) return false;
+      final scheme = uri.scheme.toLowerCase();
+      return (scheme == 'http' || scheme == 'https') && uri.host.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _looksLikeDirectMediaUrl(String url) {
+    try {
+      final uri = Uri.parse(url);
+      final host = uri.host.toLowerCase();
+      final path = uri.path.toLowerCase();
+      if (host.contains('googlevideo.com') || path.contains('videoplayback')) {
+        return true;
+      }
+      return path.endsWith('.m4a') ||
+          path.endsWith('.mp3') ||
+          path.endsWith('.webm') ||
+          path.endsWith('.aac') ||
+          path.endsWith('.ogg');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  DetectedMedia _normalizeYouTubeMediaForBackend(DetectedMedia media) {
+    final directUrl = media.url;
+    final hasWatchUrl = directUrl.contains('youtube.com/watch') ||
+        directUrl.contains('youtu.be/');
+
+    if (hasWatchUrl || media.videoId == null || media.videoId!.isEmpty) {
+      return media.copyWith(useBackend: true);
+    }
+
+    final watchUrl = 'https://www.youtube.com/watch?v=${media.videoId}';
+    return media.copyWith(url: watchUrl, useBackend: true);
+  }
+
   void _cleanup(String taskId) {
     _cancelTokens.remove(taskId);
     _backendCancelTokens.remove(taskId);
@@ -328,6 +441,7 @@ class DownloadService {
     Function(DownloadTask)? onProgress,
     CancelToken cancelToken,
   ) async {
+    final requestHeaders = await _buildRequestHeaders(task.url);
     final tempPath = '${task.savePath}.part';
     task.tempPath = tempPath;
 
@@ -344,7 +458,7 @@ class DownloadService {
     try {
       final headResponse = await _dio.head(
         task.url,
-        options: Options(headers: defaultHeaders),
+        options: Options(headers: requestHeaders),
       );
       final contentLength = headResponse.headers.value('content-length');
       if (contentLength != null) {
@@ -360,7 +474,7 @@ class DownloadService {
         downloadedBytes < task.totalBytes) {
       // Resume download - use streaming to append to existing file
       debugPrint('Resuming download from $downloadedBytes bytes');
-      final headers = Map<String, dynamic>.from(defaultHeaders);
+      final headers = Map<String, dynamic>.from(requestHeaders);
       headers['Range'] = 'bytes=$downloadedBytes-';
 
       final response = await _dio.get<ResponseBody>(
@@ -397,7 +511,7 @@ class DownloadService {
         task.url,
         tempPath,
         cancelToken: cancelToken,
-        options: Options(headers: defaultHeaders),
+        options: Options(headers: requestHeaders),
         deleteOnError: false,
         onReceiveProgress: (received, total) {
           if (_pausedDownloads[task.id] == true) {
@@ -424,6 +538,79 @@ class DownloadService {
     }
 
     return task;
+  }
+
+  Future<Map<String, dynamic>> _buildRequestHeaders(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) {
+      return Map<String, dynamic>.from(defaultHeaders);
+    }
+
+    final host = uri.host.toLowerCase();
+    final isYouTube =
+        host.contains('youtube.com') ||
+        host.contains('googlevideo.com') ||
+        host.contains('youtu.be');
+
+    if (isYouTube) {
+      return Map<String, dynamic>.from(defaultHeaders);
+    }
+
+    String refererBase;
+    if (host.contains('instagram.com') || host.contains('cdninstagram.com')) {
+      refererBase = 'https://www.instagram.com/';
+    } else if (host.contains('facebook.com') ||
+        host.contains('fb.watch') ||
+        host.contains('fbcdn.net') ||
+        host.contains('fbsbx.com')) {
+      refererBase = 'https://www.facebook.com/';
+    } else if (host.contains('twitter.com') ||
+        host.contains('x.com') ||
+        host.contains('twimg.com')) {
+      refererBase = 'https://x.com/';
+    } else if (host.contains('tiktok.com') || host.contains('tiktokcdn')) {
+      refererBase = 'https://www.tiktok.com/';
+    } else {
+      refererBase = '${uri.scheme}://${uri.host}/';
+    }
+
+    final refererUri = Uri.parse(refererBase);
+
+    final headers = <String, dynamic>{
+      'User-Agent':
+          'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Connection': 'keep-alive',
+      'Referer': refererBase,
+      'Origin': '${refererUri.scheme}://${refererUri.host}',
+    };
+
+    try {
+      final cookieFragments = <String>[];
+
+      final resourceCookies = await CookieManager.instance().getCookies(
+        url: WebUri(url),
+      );
+      if (resourceCookies.isNotEmpty) {
+        cookieFragments.addAll(resourceCookies.map((c) => '${c.name}=${c.value}'));
+      }
+
+      final refererCookies = await CookieManager.instance().getCookies(
+        url: WebUri(refererBase),
+      );
+      if (refererCookies.isNotEmpty) {
+        cookieFragments.addAll(refererCookies.map((c) => '${c.name}=${c.value}'));
+      }
+
+      if (cookieFragments.isNotEmpty) {
+        headers['Cookie'] = cookieFragments.toSet().join('; ');
+      }
+    } catch (e) {
+      debugPrint('⚠️ Failed to attach WebView cookies for $host: $e');
+    }
+
+    return headers;
   }
 
   /// Cancel a download

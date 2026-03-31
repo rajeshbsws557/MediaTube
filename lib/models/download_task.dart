@@ -1,12 +1,22 @@
-enum DownloadStatus { pending, downloading, paused, merging, completed, failed, cancelled }
+enum DownloadStatus {
+  pending,
+  downloading,
+  paused,
+  merging,
+  completed,
+  failed,
+  cancelled,
+}
 
 class DownloadTask {
   final String id;
   final String url;
   final String fileName;
-  String savePath;  // Made non-final to allow native downloader to update the path
+  String
+  savePath; // Made non-final to allow native downloader to update the path
   final String? audioUrl; // For DASH videos
   final bool requiresMerge;
+  final bool isAudioOnly;
   DownloadStatus status;
   double progress;
   int downloadedBytes; // Track bytes for resume
@@ -24,6 +34,7 @@ class DownloadTask {
     required this.savePath,
     this.audioUrl,
     this.requiresMerge = false,
+    this.isAudioOnly = false,
     this.status = DownloadStatus.pending,
     this.progress = 0,
     this.downloadedBytes = 0,
@@ -37,16 +48,17 @@ class DownloadTask {
 
   bool get canPause => status == DownloadStatus.downloading;
   bool get canResume => status == DownloadStatus.paused;
-  bool get isActive => status == DownloadStatus.downloading || 
-                       status == DownloadStatus.merging ||
-                       status == DownloadStatus.pending;
+  bool get isActive =>
+      status == DownloadStatus.downloading ||
+      status == DownloadStatus.merging ||
+      status == DownloadStatus.pending;
 
   String get statusText {
     // Use custom status message if available
     if (statusMessage != null && statusMessage!.isNotEmpty) {
       return '$statusMessage ${(progress * 100).toStringAsFixed(0)}%';
     }
-    
+
     switch (status) {
       case DownloadStatus.pending:
         return 'Pending';
@@ -67,14 +79,16 @@ class DownloadTask {
 
   String get downloadedSizeFormatted {
     if (downloadedBytes < 1024) return '$downloadedBytes B';
-    if (downloadedBytes < 1024 * 1024) return '${(downloadedBytes / 1024).toStringAsFixed(1)} KB';
+    if (downloadedBytes < 1024 * 1024)
+      return '${(downloadedBytes / 1024).toStringAsFixed(1)} KB';
     return '${(downloadedBytes / 1024 / 1024).toStringAsFixed(1)} MB';
   }
 
   String get totalSizeFormatted {
     if (totalBytes <= 0) return 'Unknown';
     if (totalBytes < 1024) return '$totalBytes B';
-    if (totalBytes < 1024 * 1024) return '${(totalBytes / 1024).toStringAsFixed(1)} KB';
+    if (totalBytes < 1024 * 1024)
+      return '${(totalBytes / 1024).toStringAsFixed(1)} KB';
     return '${(totalBytes / 1024 / 1024).toStringAsFixed(1)} MB';
   }
 
@@ -85,6 +99,7 @@ class DownloadTask {
     String? savePath,
     String? audioUrl,
     bool? requiresMerge,
+    bool? isAudioOnly,
     DownloadStatus? status,
     double? progress,
     int? downloadedBytes,
@@ -102,6 +117,7 @@ class DownloadTask {
       savePath: savePath ?? this.savePath,
       audioUrl: audioUrl ?? this.audioUrl,
       requiresMerge: requiresMerge ?? this.requiresMerge,
+      isAudioOnly: isAudioOnly ?? this.isAudioOnly,
       status: status ?? this.status,
       progress: progress ?? this.progress,
       downloadedBytes: downloadedBytes ?? this.downloadedBytes,

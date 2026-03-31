@@ -14,6 +14,17 @@ class MainActivity : FlutterActivity() {
         youtubeExtractor = YoutubeExtractor(this, flutterEngine)
         androidMuxer = AndroidMuxer(flutterEngine)
         
+        // App Channel
+        io.flutter.plugin.common.MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.rajesh.mediatube/app")
+            .setMethodCallHandler { call, result ->
+                if (call.method == "moveToBackground") {
+                    val success = moveTaskToBack(true)
+                    result.success(success)
+                } else {
+                    result.notImplemented()
+                }
+            }
+
         // Security Channel
         io.flutter.plugin.common.MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.rajesh.mediatube/security")
             .setMethodCallHandler { call, result ->

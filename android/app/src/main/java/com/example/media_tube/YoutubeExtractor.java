@@ -96,6 +96,10 @@ public class YoutubeExtractor {
                         result.error("INVALID_ARGUMENT", "URL is required", null);
                         return;
                     }
+                    if (!isSafeHttpUrl(url)) {
+                        result.error("INVALID_ARGUMENT", "Only http/https URLs with host are allowed", null);
+                        return;
+                    }
                     getVideoInfoAsync(url, result);
                     break;
                 }
@@ -104,6 +108,10 @@ public class YoutubeExtractor {
                     String quality = call.argument("quality");
                     if (url == null || url.isEmpty()) {
                         result.error("INVALID_ARGUMENT", "URL is required", null);
+                        return;
+                    }
+                    if (!isSafeHttpUrl(url)) {
+                        result.error("INVALID_ARGUMENT", "Only http/https URLs with host are allowed", null);
                         return;
                     }
                     if (quality == null)
@@ -421,6 +429,20 @@ public class YoutubeExtractor {
             return "video";
         String r = s.replaceAll("[<>:\"/\\\\|?*]", "_").trim();
         return r.length() > 80 ? r.substring(0, 80) : r;
+    }
+
+    private boolean isSafeHttpUrl(String rawUrl) {
+        try {
+            java.net.URI uri = new java.net.URI(rawUrl);
+            if (uri.getScheme() == null || uri.getHost() == null || uri.getHost().isEmpty()) {
+                return false;
+            }
+
+            String scheme = uri.getScheme().toLowerCase(Locale.US);
+            return "http".equals(scheme) || "https".equals(scheme);
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     public void dispose() {

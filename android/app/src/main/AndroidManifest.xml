@@ -19,8 +19,7 @@
         android:label="MediaTube"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
-        android:usesCleartextTraffic="true"
-        android:requestLegacyExternalStorage="true">
+        android:usesCleartextTraffic="false">
         <activity
             android:name="com.example.media_tube.MainActivity"
             android:exported="true"

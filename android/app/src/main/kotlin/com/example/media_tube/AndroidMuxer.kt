@@ -27,6 +27,12 @@ class AndroidMuxer(flutterEngine: FlutterEngine) {
                         return@setMethodCallHandler
                     }
 
+                    val validationError = validatePaths(videoPath, audioPath, outputPath)
+                    if (validationError != null) {
+                        result.error("INVALID_PATHS", validationError, null)
+                        return@setMethodCallHandler
+                    }
+
                     thread {
                         try {
                             val success = merge(videoPath, audioPath, outputPath)
@@ -58,6 +64,11 @@ class AndroidMuxer(flutterEngine: FlutterEngine) {
 
         try {
             val outputFile = File(outputPath)
+            outputFile.parentFile?.let { parent ->
+                if (!parent.exists()) {
+                    parent.mkdirs()
+                }
+            }
             if (outputFile.exists()) {
                 outputFile.delete()
             }
@@ -163,6 +174,46 @@ class AndroidMuxer(flutterEngine: FlutterEngine) {
                 muxer?.stop()
                 muxer?.release() 
             } catch (e: Exception) {}
+        }
+    }
+
+    private fun validatePaths(videoPath: String, audioPath: String, outputPath: String): String? {
+        if (videoPath.isBlank() || audioPath.isBlank() || outputPath.isBlank()) {
+            return "Paths must not be empty"
+        }
+
+        val videoFile = File(videoPath)
+        if (!videoFile.exists() || !videoFile.isFile) {
+            return "Video input file not found"
+        }
+
+        val audioFile = File(audioPath)
+        if (!audioFile.exists() || !audioFile.isFile) {
+            return "Audio input file not found"
+        }
+
+        val outputFile = File(outputPath)
+        val parent = outputFile.parentFile
+        if (parent == null) {
+            return "Output path must include a parent directory"
+        }
+
+        if (!parent.exists() && !parent.mkdirs()) {
+            return "Unable to create output directory"
+        }
+
+        return try {
+            val videoCanonical = videoFile.canonicalPath
+            val audioCanonical = audioFile.canonicalPath
+            val outputCanonical = outputFile.canonicalPath
+
+            if (outputCanonical == videoCanonical || outputCanonical == audioCanonical) {
+                "Output path must not overwrite input files"
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            "Invalid media file paths"
         }
     }
 

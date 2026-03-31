@@ -1,6 +1,9 @@
 import 'dart:async';
+import 'dart:isolate';
+import 'dart:ui';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import '../main.dart';
 
 /// Service to manage download notifications with detailed progress
 /// Also handles foreground service for background downloads
@@ -36,7 +39,26 @@ class BackgroundDownloadService {
       android: androidSettings,
     );
 
-    await _notifications.initialize(initSettings);
+    await _notifications.initialize(
+      initSettings,
+      onDidReceiveNotificationResponse: (response) {
+        final SendPort? sendPort = IsolateNameServer.lookupPortByName(
+          'download_actions_port',
+        );
+        if (sendPort != null) {
+          if (response.actionId != null) {
+            if (response.payload != null) {
+              sendPort.send('${response.actionId}_${response.payload}');
+            } else {
+              sendPort.send(response.actionId);
+            }
+          } else if (response.payload != null) {
+            sendPort.send('open_${response.payload}');
+          }
+        }
+      },
+      onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
+    );
 
     // Create notification channel
     const AndroidNotificationChannel channel = AndroidNotificationChannel(
@@ -102,6 +124,8 @@ class BackgroundDownloadService {
     required int totalBytes,
     required bool isMerging,
     required int downloadId,
+    required String taskId,
+    bool isPaused = false,
     int? speedBytesPerSec,
   }) async {
     if (!_isInitialized) await initialize();
@@ -110,7 +134,7 @@ class BackgroundDownloadService {
 
     // Format speed
     String speedText = '';
-    if (speedBytesPerSec != null && speedBytesPerSec > 0) {
+    if (speedBytesPerSec != null && speedBytesPerSec > 0 && !isPaused) {
       speedText = ' • ${_formatBytes(speedBytesPerSec)}/s';
     }
 
@@ -130,7 +154,10 @@ class BackgroundDownloadService {
     }
 
     String statusText;
-    if (isMerging) {
+    if (isPaused) {
+      statusText =
+          'Paused - ${_formatBytes(downloadedBytes)} / ${_formatBytes(totalBytes)}';
+    } else if (isMerging) {
       statusText = 'Merging: $progressPercent%';
     } else if (totalBytes > 0) {
       statusText =
@@ -146,13 +173,41 @@ class BackgroundDownloadService {
           channelDescription: 'Download notifications',
           importance: Importance.low,
           priority: Priority.low,
-          ongoing: true,
-          showProgress: true,
+          ongoing: !isPaused,
+          showProgress: !isPaused,
           maxProgress: 100,
           progress: progressPercent,
           onlyAlertOnce: true,
           channelShowBadge: false,
-          subText: '$progressPercent%',
+          subText: isPaused ? 'Paused' : '$progressPercent%',
+          groupKey: 'mediatube_downloads_group',
+          actions: isPaused
+              ? <AndroidNotificationAction>[
+                  AndroidNotificationAction(
+                    'resume',
+                    'Resume',
+                    showsUserInterface: false,
+                  ),
+                  AndroidNotificationAction(
+                    'cancel',
+                    'Cancel',
+                    showsUserInterface: false,
+                    cancelNotification: true,
+                  ),
+                ]
+              : <AndroidNotificationAction>[
+                  AndroidNotificationAction(
+                    'pause',
+                    'Pause',
+                    showsUserInterface: false,
+                  ),
+                  AndroidNotificationAction(
+                    'cancel',
+                    'Cancel',
+                    showsUserInterface: false,
+                    cancelNotification: true,
+                  ),
+                ],
         );
 
     final NotificationDetails notificationDetails = NotificationDetails(
@@ -164,6 +219,31 @@ class BackgroundDownloadService {
       title, // Use actual title instead of generic "Downloading"
       statusText,
       notificationDetails,
+      payload: taskId,
+    );
+
+    // Show summary notification for grouping
+    await _showGroupSummary();
+  }
+
+  Future<void> _showGroupSummary() async {
+    const AndroidNotificationDetails summaryDetails =
+        AndroidNotificationDetails(
+          'mediatube_downloads',
+          'Downloads',
+          channelDescription: 'Download notifications',
+          importance: Importance.low,
+          priority: Priority.low,
+          groupKey: 'mediatube_downloads_group',
+          setAsGroupSummary: true,
+          onlyAlertOnce: true,
+        );
+
+    await _notifications.show(
+      99999, // Unique ID for summary
+      'MediaTube Downloads',
+      'Active downloads',
+      const NotificationDetails(android: summaryDetails),
     );
   }
 
@@ -172,6 +252,7 @@ class BackgroundDownloadService {
     required String title,
     required double progress,
     required int downloadId,
+    required String taskId,
   }) async {
     await updateProgressDetailed(
       title: title,
@@ -180,6 +261,7 @@ class BackgroundDownloadService {
       totalBytes: 0,
       isMerging: false,
       downloadId: downloadId,
+      taskId: taskId,
     );
   }
 
@@ -187,6 +269,8 @@ class BackgroundDownloadService {
   Future<void> showCompleteNotification({
     required String title,
     required int downloadId,
+    required String taskId,
+    required String savePath,
   }) async {
     if (!_isInitialized) await initialize();
 
@@ -197,6 +281,15 @@ class BackgroundDownloadService {
           channelDescription: 'Download notifications',
           importance: Importance.high,
           priority: Priority.high,
+          groupKey: 'mediatube_downloads_group',
+          actions: <AndroidNotificationAction>[
+            AndroidNotificationAction('open', 'Open', showsUserInterface: true),
+            AndroidNotificationAction(
+              'share',
+              'Share',
+              showsUserInterface: true,
+            ),
+          ],
         );
 
     const NotificationDetails notificationDetails = NotificationDetails(
@@ -208,7 +301,9 @@ class BackgroundDownloadService {
       'Download Complete',
       title,
       notificationDetails,
+      payload: savePath, // Store path so tapping the notification opens it
     );
+    await _showGroupSummary();
   }
 
   /// Show download failed notification
@@ -216,6 +311,7 @@ class BackgroundDownloadService {
     required String title,
     required String error,
     required int downloadId,
+    required String taskId,
   }) async {
     if (!_isInitialized) await initialize();
 
@@ -226,6 +322,22 @@ class BackgroundDownloadService {
           channelDescription: 'Download notifications',
           importance: Importance.high,
           priority: Priority.high,
+          groupKey: 'mediatube_downloads_group',
+          color: Color(0xFFE53935), // Material Red 600
+          colorized: true,
+          actions: <AndroidNotificationAction>[
+            AndroidNotificationAction(
+              'retry',
+              'Retry',
+              showsUserInterface: false,
+            ),
+            AndroidNotificationAction(
+              'dismiss',
+              'Dismiss',
+              showsUserInterface: false,
+              cancelNotification: true,
+            ),
+          ],
         );
 
     const NotificationDetails notificationDetails = NotificationDetails(
@@ -237,7 +349,9 @@ class BackgroundDownloadService {
       'Download Failed',
       '$title: $error',
       notificationDetails,
+      payload: taskId,
     );
+    await _showGroupSummary();
   }
 
   /// Cancel a notification

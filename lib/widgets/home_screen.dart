@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:convert';
+import '../utils/utils.dart';
 
 /// Data model for quick access sites
 class QuickAccessSite {
@@ -15,14 +18,40 @@ class QuickAccessSite {
     required this.color,
     this.imageAsset,
   });
+
+  Map<String, dynamic> toJson() {
+    // We can't save IconData directly due to tree-shaking issues in release mode.
+    // In a real app we'd map this to a string. For Custom sites, it's always Icons.language.
+    return {
+      'name': name,
+      'url': url,
+      // Just save a string identifier or default to 'custom'
+      'iconName': 'custom',
+      'color': color.value,
+    };
+  }
+
+  factory QuickAccessSite.fromJson(Map<String, dynamic> json) {
+    return QuickAccessSite(
+      name: json['name'],
+      url: json['url'],
+      icon: Icons.language, // Always use the constant Icon
+      color: Color(json['color']),
+    );
+  }
 }
 
 /// Home screen widget with quick access to popular sites
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   final Function(String url) onNavigate;
-  
+
   const HomeScreen({super.key, required this.onNavigate});
 
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
   static const List<QuickAccessSite> _socialMedia = [
     QuickAccessSite(
       name: 'YouTube',
@@ -140,16 +169,103 @@ class HomeScreen extends StatelessWidget {
     ),
   ];
 
+  List<QuickAccessSite> _customSites = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadCustomSites();
+  }
+
+  Future<void> _loadCustomSites() async {
+    final prefs = await SharedPreferences.getInstance();
+    final sitesJson = prefs.getStringList('custom_quick_sites');
+    if (sitesJson != null) {
+      setState(() {
+        _customSites = sitesJson
+            .map((s) => QuickAccessSite.fromJson(jsonDecode(s)))
+            .toList();
+      });
+    }
+  }
+
+  Future<void> _saveCustomSites() async {
+    final prefs = await SharedPreferences.getInstance();
+    final sitesJson = _customSites.map((s) => jsonEncode(s.toJson())).toList();
+    await prefs.setStringList('custom_quick_sites', sitesJson);
+  }
+
+  void _showAddSiteDialog() {
+    final nameController = TextEditingController();
+    final urlController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Add Quick Site'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameController,
+              decoration: const InputDecoration(
+                labelText: 'Name',
+                hintText: 'My Site',
+              ),
+            ),
+            TextField(
+              controller: urlController,
+              decoration: const InputDecoration(
+                labelText: 'URL',
+                hintText: 'https://example.com',
+              ),
+              keyboardType: TextInputType.url,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () {
+              if (nameController.text.isNotEmpty &&
+                  urlController.text.isNotEmpty) {
+                String fullUrl = urlController.text;
+                if (!fullUrl.startsWith('http')) fullUrl = 'https://$fullUrl';
+
+                setState(() {
+                  _customSites.add(
+                    QuickAccessSite(
+                      name: nameController.text,
+                      url: fullUrl,
+                      icon: Icons.language,
+                      color: Colors.blueAccent,
+                    ),
+                  );
+                });
+                _saveCustomSites();
+                Navigator.pop(context);
+              }
+            },
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    
+
     return Container(
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: isDark 
+          colors: isDark
               ? [const Color(0xFF1A1A2E), const Color(0xFF16213E)]
               : [const Color(0xFFF5F7FA), const Color(0xFFE4E8EE)],
         ),
@@ -162,11 +278,23 @@ class HomeScreen extends StatelessWidget {
             // Logo and welcome
             _buildHeader(context, isDark),
             const SizedBox(height: 32),
-            
+
             // Search bar
             _buildSearchBar(context, isDark),
             const SizedBox(height: 32),
-            
+
+            // My Sites (Custom) section
+            _buildSection(
+              context,
+              title: 'My Sites',
+              icon: Icons.star,
+              color: Colors.amber,
+              sites: _customSites,
+              isDark: isDark,
+              isCustom: true,
+            ),
+            const SizedBox(height: 24),
+
             // Social Media section
             _buildSection(
               context,
@@ -177,7 +305,7 @@ class HomeScreen extends StatelessWidget {
               isDark: isDark,
             ),
             const SizedBox(height: 24),
-            
+
             // Entertainment section
             _buildSection(
               context,
@@ -188,7 +316,7 @@ class HomeScreen extends StatelessWidget {
               isDark: isDark,
             ),
             const SizedBox(height: 24),
-            
+
             // More sites section
             _buildSection(
               context,
@@ -199,7 +327,7 @@ class HomeScreen extends StatelessWidget {
               isDark: isDark,
             ),
             const SizedBox(height: 32),
-            
+
             // Tip card
             _buildTipCard(context, isDark),
             const SizedBox(height: 24),
@@ -227,7 +355,11 @@ class HomeScreen extends StatelessWidget {
               ),
             ],
           ),
-          child: const Icon(Icons.download_rounded, color: Colors.white, size: 32),
+          child: const Icon(
+            Icons.download_rounded,
+            color: Colors.white,
+            size: 32,
+          ),
         ),
         const SizedBox(width: 16),
         Column(
@@ -254,11 +386,9 @@ class HomeScreen extends StatelessWidget {
     );
   }
 
-  // NOTE: Since HomeScreen is StatelessWidget, the TextEditingController
-  // is intentionally lightweight here. For a StatefulWidget approach with
-  // proper disposal, wrap HomeScreen in a StatefulWidget.
+  // NOTE: Since HomeScreen is StatefulWidget, we can manage SearchBar lifecycle
   Widget _buildSearchBar(BuildContext context, bool isDark) {
-    return _SearchBarWidget(isDark: isDark, onNavigate: onNavigate);
+    return _SearchBarWidget(isDark: isDark, onNavigate: widget.onNavigate);
   }
 
   Widget _buildSection(
@@ -268,29 +398,73 @@ class HomeScreen extends StatelessWidget {
     required Color color,
     required List<QuickAccessSite> sites,
     required bool isDark,
+    bool isCustom = false,
   }) {
+    if (isCustom && sites.isEmpty) {
+      return Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: color.withAlpha(50),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, color: color, size: 20),
+              ),
+              const SizedBox(width: 12),
+              Text(
+                title,
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: isDark ? Colors.white : Colors.black87,
+                ),
+              ),
+            ],
+          ),
+          IconButton(
+            icon: const Icon(Icons.add_circle, color: Colors.blue),
+            onPressed: _showAddSiteDialog,
+          ),
+        ],
+      );
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: color.withAlpha(50),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Icon(icon, color: color, size: 20),
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: color.withAlpha(50),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(icon, color: color, size: 20),
+                ),
+                const SizedBox(width: 12),
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: isDark ? Colors.white : Colors.black87,
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(width: 12),
-            Text(
-              title,
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-                color: isDark ? Colors.white : Colors.black87,
+            if (isCustom)
+              IconButton(
+                icon: const Icon(Icons.add_circle, color: Colors.blue),
+                onPressed: _showAddSiteDialog,
               ),
-            ),
           ],
         ),
         const SizedBox(height: 16),
@@ -305,30 +479,76 @@ class HomeScreen extends StatelessWidget {
           ),
           itemCount: sites.length,
           itemBuilder: (context, index) {
-            return _buildSiteCard(context, sites[index], isDark);
+            return _buildSiteCard(
+              context,
+              sites[index],
+              isDark,
+              isCustom: isCustom,
+              index: index,
+            );
           },
         ),
       ],
     );
   }
 
-  Widget _buildSiteCard(BuildContext context, QuickAccessSite site, bool isDark) {
+  Widget _buildSiteCard(
+    BuildContext context,
+    QuickAccessSite site,
+    bool isDark, {
+    bool isCustom = false,
+    int index = -1,
+  }) {
     return Material(
       color: Colors.transparent,
       child: InkWell(
-        onTap: () => onNavigate(site.url),
+        onTap: () => widget.onNavigate(site.url),
+        onLongPress: isCustom
+            ? () {
+                showDialog(
+                  context: context,
+                  builder: (context) => AlertDialog(
+                    title: const Text('Delete Quick Site?'),
+                    content: Text(
+                      'Remove ${site.name} from your quick access?',
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(context),
+                        child: const Text('Cancel'),
+                      ),
+                      TextButton(
+                        onPressed: () {
+                          setState(() {
+                            _customSites.removeAt(index);
+                          });
+                          _saveCustomSites();
+                          Navigator.pop(context);
+                        },
+                        child: const Text(
+                          'Delete',
+                          style: TextStyle(color: Colors.red),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              }
+            : null,
         borderRadius: BorderRadius.circular(16),
         child: Container(
           decoration: BoxDecoration(
             color: isDark ? Colors.white.withAlpha(20) : Colors.white,
             borderRadius: BorderRadius.circular(16),
-            boxShadow: isDark ? null : [
-              BoxShadow(
-                color: Colors.black.withAlpha(15),
-                blurRadius: 10,
-                offset: const Offset(0, 2),
-              ),
-            ],
+            boxShadow: isDark
+                ? null
+                : [
+                    BoxShadow(
+                      color: Colors.black.withAlpha(15),
+                      blurRadius: 10,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
           ),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
@@ -408,10 +628,7 @@ class HomeScreen extends StatelessWidget {
                 SizedBox(height: 4),
                 Text(
                   'Navigate to any video and tap the download button to save media to your device!',
-                  style: TextStyle(
-                    color: Colors.white70,
-                    fontSize: 13,
-                  ),
+                  style: TextStyle(color: Colors.white70, fontSize: 13),
                 ),
               ],
             ),
@@ -440,16 +657,19 @@ class _SearchBarWidgetState extends State<_SearchBarWidget> {
     super.dispose();
   }
 
-  String _processUrl(String text) {
-    String url = text;
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      if (url.contains('.') && !url.contains(' ')) {
-        url = 'https://$url';
-      } else {
-        url = 'https://www.google.com/search?q=${Uri.encodeComponent(url)}';
-      }
+  String? _processUrl(String text) {
+    return UrlInputSanitizer.sanitizeToNavigableUrl(text);
+  }
+
+  void _submitInput(String input) {
+    final normalized = _processUrl(input);
+    if (normalized == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Only valid http/https URLs are allowed.')),
+      );
+      return;
     }
-    return url;
+    widget.onNavigate(normalized);
   }
 
   @override
@@ -458,13 +678,15 @@ class _SearchBarWidgetState extends State<_SearchBarWidget> {
       decoration: BoxDecoration(
         color: widget.isDark ? Colors.white.withAlpha(25) : Colors.white,
         borderRadius: BorderRadius.circular(16),
-        boxShadow: widget.isDark ? null : [
-          BoxShadow(
-            color: Colors.black.withAlpha(15),
-            blurRadius: 20,
-            offset: const Offset(0, 4),
-          ),
-        ],
+        boxShadow: widget.isDark
+            ? null
+            : [
+                BoxShadow(
+                  color: Colors.black.withAlpha(15),
+                  blurRadius: 20,
+                  offset: const Offset(0, 4),
+                ),
+              ],
       ),
       child: TextField(
         controller: _controller,
@@ -484,19 +706,20 @@ class _SearchBarWidgetState extends State<_SearchBarWidget> {
             ),
             onPressed: () {
               if (_controller.text.isNotEmpty) {
-                widget.onNavigate(_processUrl(_controller.text));
+                _submitInput(_controller.text);
               }
             },
           ),
           border: InputBorder.none,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 20,
+            vertical: 16,
+          ),
         ),
-        style: TextStyle(
-          color: widget.isDark ? Colors.white : Colors.black87,
-        ),
+        style: TextStyle(color: widget.isDark ? Colors.white : Colors.black87),
         onSubmitted: (text) {
           if (text.isNotEmpty) {
-            widget.onNavigate(_processUrl(text));
+            _submitInput(text);
           }
         },
       ),

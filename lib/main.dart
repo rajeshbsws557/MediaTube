@@ -5,15 +5,41 @@
 // License - MIT
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:dynamic_color/dynamic_color.dart';
+import 'models/models.dart';
 import 'providers/providers.dart';
 import 'screens/screens.dart';
-import 'services/update_manager.dart';
-import 'services/security_service.dart';
+import 'services/services.dart';
+import 'dart:ui';
+import 'dart:isolate';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+
+@pragma('vm:entry-point')
+void notificationTapBackground(NotificationResponse notificationResponse) {
+  final SendPort? sendPort = IsolateNameServer.lookupPortByName(
+    'download_actions_port',
+  );
+  if (sendPort != null) {
+    if (notificationResponse.actionId != null) {
+      // payload will hold task ID or similar context, while actionId is the verb
+      if (notificationResponse.payload != null) {
+        sendPort.send(
+          '${notificationResponse.actionId}_${notificationResponse.payload}',
+        );
+      } else {
+        sendPort.send(notificationResponse.actionId);
+      }
+    } else if (notificationResponse.payload != null) {
+      sendPort.send('open_${notificationResponse.payload}');
+    }
+  }
+}
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -33,9 +59,6 @@ void main() async {
   // MobileAds.instance.initialize(); // Without await
   // ============================================================
 
-  // Request necessary permissions
-  await _requestPermissions();
-
   // Initialize InAppWebView (for Android)
   if (await WebViewFeature.isFeatureSupported(
     WebViewFeature.WEB_MESSAGE_LISTENER,
@@ -49,14 +72,8 @@ void main() async {
   runApp(const MediaTubeApp());
 }
 
-Future<void> _requestPermissions() async {
-  // Request storage permissions
-  await [
-    Permission.storage,
-    Permission.manageExternalStorage,
-    Permission.notification,
-  ].request();
-}
+final GlobalKey<ScaffoldMessengerState> scaffoldMessengerKey =
+    GlobalKey<ScaffoldMessengerState>();
 
 class MediaTubeApp extends StatelessWidget {
   const MediaTubeApp({super.key});
@@ -67,26 +84,37 @@ class MediaTubeApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(create: (_) => BrowserProvider()),
         ChangeNotifierProvider(create: (_) => DownloadProvider()),
+        ChangeNotifierProvider(create: (_) => SettingsProvider()),
       ],
-      child: MaterialApp(
-        title: 'MediaTube',
-        debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(
-            seedColor: Colors.deepPurple,
-            brightness: Brightness.light,
-          ),
-          useMaterial3: true,
-        ),
-        darkTheme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(
-            seedColor: Colors.deepPurple,
-            brightness: Brightness.dark,
-          ),
-          useMaterial3: true,
-        ),
-        themeMode: ThemeMode.system,
-        home: const MediaTubeHome(),
+      child: DynamicColorBuilder(
+        builder: (ColorScheme? lightDynamic, ColorScheme? darkDynamic) {
+          ColorScheme lightScheme;
+          ColorScheme darkScheme;
+
+          if (lightDynamic != null && darkDynamic != null) {
+            lightScheme = lightDynamic.harmonized();
+            darkScheme = darkDynamic.harmonized();
+          } else {
+            lightScheme = ColorScheme.fromSeed(
+              seedColor: Colors.deepPurple,
+              brightness: Brightness.light,
+            );
+            darkScheme = ColorScheme.fromSeed(
+              seedColor: Colors.deepPurple,
+              brightness: Brightness.dark,
+            );
+          }
+
+          return MaterialApp(
+            title: 'MediaTube',
+            debugShowCheckedModeBanner: false,
+            scaffoldMessengerKey: scaffoldMessengerKey,
+            theme: ThemeData(colorScheme: lightScheme, useMaterial3: true),
+            darkTheme: ThemeData(colorScheme: darkScheme, useMaterial3: true),
+            themeMode: ThemeMode.system,
+            home: const MediaTubeHome(),
+          );
+        },
       ),
     );
   }
@@ -163,27 +191,244 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
   }
 
   Future<void> _handleSharedContent(String content) async {
-    debugPrint("Shared content received: $content");
-    // YouTube share often comes as "Title https://youtu.be/..." or just URL
-    // Extract generic URL logic
-    final urlRegex = RegExp(r'https?://\S+');
-    final match = urlRegex.firstMatch(content);
-    final url =
-        match?.group(0) ??
-        content; // Use extracted URL or full content if no match
+    debugPrint('Shared content received');
+    final url = ShareUrlService.normalizeSharedUrl(content);
+    if (url == null || !ShareUrlService.isSupportedWebUrl(url)) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Unsupported shared link format. Please share a web post URL.'),
+        ),
+      );
+      return;
+    }
 
-    // Set pending URL for BrowserScreen to handle
-    if (context.mounted) {
+    if (!mounted) return;
+
+    final settings = context.read<SettingsProvider>();
+    final downloadProvider = context.read<DownloadProvider>();
+    final action = settings.defaultShareAction;
+
+    if (action != DefaultShareAction.alwaysAsk) {
+      // Headless auto-download execution
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            action == DefaultShareAction.autoVideo
+                ? 'Downloading Best Video...'
+                : 'Downloading Audio...',
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+
+      final ytService = YouTubeService();
+      if (ytService.isValidYouTubeUrl(url)) {
+        try {
+          final streams = await ytService.getAvailableStreams(url);
+          if (streams.isNotEmpty && context.mounted) {
+            DetectedMedia selectedOption;
+            if (action == DefaultShareAction.autoVideo) {
+              // Pick highest quality video format (first non-audio-only)
+              selectedOption = streams.firstWhere(
+                (s) => s.type != MediaType.audio,
+                orElse: () => streams.first,
+              );
+            } else {
+              // Pick audio only
+              selectedOption = streams.firstWhere(
+                (s) => s.type == MediaType.audio,
+                orElse: () => streams.last, // fallback to lowest res
+              );
+            }
+            downloadProvider.startDownload(selectedOption);
+            _moveToBackgroundAfterDelay();
+          }
+        } catch (e) {
+          debugPrint('Headless fetch failed: $e');
+          // If headless fails, fallback to UI
+          if (!mounted) return;
+          context.read<BrowserProvider>().setPendingUrl(url);
+        }
+      } else {
+        final started = await _tryAutoDownloadSharedSocial(
+          url: url,
+          action: action,
+          downloadProvider: downloadProvider,
+        );
+
+        if (!mounted) return;
+
+        if (started) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Auto download started from shared link'),
+              duration: Duration(seconds: 2),
+            ),
+          );
+          _moveToBackgroundAfterDelay();
+        } else {
+          // Fallback to browser sheet flow if quick auto mode cannot detect streams.
+          context.read<BrowserProvider>().setPendingUrl(url);
+        }
+      }
+    } else {
+      // Always Ask - Set pending URL for BrowserScreen to handle
       context.read<BrowserProvider>().setPendingUrl(url);
     }
   }
 
+  void _moveToBackgroundAfterDelay() {
+    Future.delayed(const Duration(milliseconds: 1500), () async {
+      try {
+        const platform = MethodChannel('com.rajesh.mediatube/app');
+        await platform.invokeMethod('moveToBackground');
+      } catch (_) {
+        SystemNavigator.pop();
+      }
+    });
+  }
+
+  Future<bool> _tryAutoDownloadSharedSocial({
+    required String url,
+    required DefaultShareAction action,
+    required DownloadProvider downloadProvider,
+  }) async {
+    final extractor = WebViewExtractorService();
+    final candidates = _buildShareExtractionCandidates(url);
+
+    for (final candidate in candidates) {
+      try {
+        final media = await extractor
+            .extractMedia(candidate)
+            .timeout(const Duration(seconds: 12));
+        if (media.isEmpty) {
+          continue;
+        }
+
+        final selected = _pickBestAutoMedia(media, action);
+        if (selected == null) {
+          continue;
+        }
+
+        await downloadProvider.startDownload(selected);
+        return true;
+      } catch (e) {
+        debugPrint('Auto social extraction failed for a candidate URL: $e');
+      }
+    }
+
+    return false;
+  }
+
+  List<String> _buildShareExtractionCandidates(String rawUrl) {
+    final normalized = ShareUrlService.normalizeSharedUrl(rawUrl) ?? rawUrl;
+    final candidates = <String>[];
+
+    void add(String value) {
+      final uri = Uri.tryParse(value);
+      if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+        return;
+      }
+
+      final scheme = uri.scheme.toLowerCase();
+      if (scheme != 'http' && scheme != 'https') {
+        return;
+      }
+
+      final cleaned = uri.toString();
+      if (!candidates.contains(cleaned)) {
+        candidates.add(cleaned);
+      }
+    }
+
+    add(normalized);
+
+    final uri = Uri.tryParse(normalized);
+    if (uri != null) {
+      final host = uri.host.toLowerCase();
+      if (host.contains('facebook.com') || host.contains('fb.watch')) {
+        add(uri.replace(scheme: 'https', host: 'm.facebook.com').toString());
+        add(uri.replace(scheme: 'https', host: 'www.facebook.com').toString());
+
+        final watchId = uri.queryParameters['v'] ?? uri.queryParameters['video_id'];
+        if (watchId != null && watchId.isNotEmpty) {
+          add('https://m.facebook.com/watch/?v=$watchId');
+        }
+      }
+    }
+
+    return candidates;
+  }
+
+  DetectedMedia? _pickBestAutoMedia(
+    List<DetectedMedia> media,
+    DefaultShareAction action,
+  ) {
+    List<DetectedMedia> candidates;
+
+    if (action == DefaultShareAction.autoAudio) {
+      candidates = media.where((m) => m.type == MediaType.audio).toList();
+      if (candidates.isEmpty) {
+        return null;
+      }
+    } else {
+      candidates = media
+          .where((m) => m.type == MediaType.video || m.type == MediaType.stream)
+          .toList();
+      if (candidates.isEmpty) {
+        candidates = media;
+      }
+    }
+
+    if (candidates.isEmpty) {
+      return null;
+    }
+
+    int score(DetectedMedia item) {
+      var value = item.fileSize ?? 0;
+
+      final quality = (item.quality ?? '').toLowerCase();
+      final qualityMatch = RegExp(r'(\d{3,4})p').firstMatch(quality);
+      if (qualityMatch != null) {
+        value += int.parse(qualityMatch.group(1)!) * 1024 * 1024;
+      }
+
+      if (item.type == MediaType.video) {
+        value += 2 * 1024 * 1024;
+      }
+
+      final format = (item.format ?? '').toLowerCase();
+      if (format == 'm3u8' || format == 'mpd') {
+        value -= 5 * 1024 * 1024;
+      }
+
+      if (item.isDash) {
+        value -= 512 * 1024;
+      }
+
+      return value;
+    }
+
+    candidates.sort((a, b) => score(b).compareTo(score(a)));
+    return candidates.first;
+  }
+
   Future<void> _checkPermissions() async {
     final storageStatus = await Permission.storage.status;
-    final manageStatus = await Permission.manageExternalStorage.status;
+    var fallbackStorageReady = false;
+
+    try {
+      final downloadService = DownloadService();
+      await downloadService.ensureDownloadDirectory();
+      downloadService.dispose();
+      fallbackStorageReady = true;
+    } catch (_) {
+      fallbackStorageReady = false;
+    }
 
     setState(() {
-      _permissionsGranted = storageStatus.isGranted || manageStatus.isGranted;
+      _permissionsGranted = storageStatus.isGranted || fallbackStorageReady;
     });
 
     // Check for updates after permissions are verified
@@ -226,7 +471,7 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
   }
 
   Future<void> _requestPermissions() async {
-    await [Permission.storage, Permission.manageExternalStorage].request();
+    await [Permission.storage, Permission.notification].request();
     _checkPermissions();
   }
 

@@ -1,7 +1,11 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:provider/provider.dart';
+import 'package:flutter/services.dart';
 import '../providers/providers.dart';
+import '../services/services.dart';
+import '../utils/utils.dart';
 import '../widgets/widgets.dart';
 import 'downloads_screen.dart';
 
@@ -12,7 +16,8 @@ class BrowserScreen extends StatefulWidget {
   State<BrowserScreen> createState() => _BrowserScreenState();
 }
 
-class _BrowserScreenState extends State<BrowserScreen> {
+class _BrowserScreenState extends State<BrowserScreen>
+    with WidgetsBindingObserver {
   InAppWebViewController? _webViewController;
   final TextEditingController _urlController = TextEditingController();
   final FocusNode _urlFocusNode = FocusNode();
@@ -30,17 +35,52 @@ class _BrowserScreenState extends State<BrowserScreen> {
   // Reactive listener for share-to-download intents
   BrowserProvider? _browserProviderRef;
   bool _isProcessingPendingUrl = false;
+  bool _requestInterceptionEnabled = false;
+
+  bool _shouldEnableRequestInterception(BrowserProvider provider) {
+    return provider.shouldObserveNetworkMedia;
+  }
+
+  Future<void> _syncRequestInterceptionMode(
+    BrowserProvider provider, {
+    bool force = false,
+  }) async {
+    final shouldEnable = _shouldEnableRequestInterception(provider);
+    if (!force && _requestInterceptionEnabled == shouldEnable) {
+      return;
+    }
+
+    _requestInterceptionEnabled = shouldEnable;
+    final controller = _webViewController;
+    if (controller == null) {
+      return;
+    }
+
+    try {
+      await controller.setSettings(
+        settings: InAppWebViewSettings(
+          useShouldInterceptRequest: shouldEnable,
+        ),
+      );
+    } catch (e) {
+      debugPrint('Failed to toggle request interception: $e');
+    }
+  }
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _urlController.text = _currentUrl;
 
     // Set up reactive listener for share-to-download intents
     // and preload WebView after first frame
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _browserProviderRef = Provider.of<BrowserProvider>(context, listen: false);
+      _browserProviderRef = Provider.of<BrowserProvider>(
+        context,
+        listen: false,
+      );
       _browserProviderRef!.addListener(_checkAndProcessPendingUrl);
       // Check immediately in case a URL was set before listener attached
       _checkAndProcessPendingUrl();
@@ -58,10 +98,61 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _browserProviderRef?.removeListener(_checkAndProcessPendingUrl);
     _urlController.dispose();
     _urlFocusNode.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkClipboardForMedia();
+    }
+  }
+
+  Future<void> _checkClipboardForMedia() async {
+    try {
+      final clipboardData = await Clipboard.getData(Clipboard.kTextPlain);
+      final text = clipboardData?.text?.trim() ?? '';
+
+      final urlRegex = RegExp(r'https?://[^\s]+');
+      final match = urlRegex.firstMatch(text);
+      if (match == null) return;
+
+      String url = match.group(0)!;
+      url = url.replaceAll(RegExp(r'[.,!?;:]+$'), '');
+
+      final ytService = YouTubeService();
+      if (!ytService.isValidYouTubeUrl(url)) return;
+
+      if (!mounted) return;
+      final downloadProvider = context.read<DownloadProvider>();
+
+      // Check if already in active/history
+      final exists =
+          downloadProvider.allDownloadsHistory.any((task) => task.url == url) ||
+          downloadProvider.activeDownloads.any((task) => task.url == url);
+
+      if (exists || _currentUrl == url) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('YouTube link detected in clipboard.'),
+          action: SnackBarAction(
+            label: 'Load',
+            onPressed: () {
+              _loadUrl(url);
+              _processPendingUrl(url);
+            },
+          ),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    } catch (e) {
+      debugPrint('Clipboard check error: $e');
+    }
   }
 
   /// Reactively checks for and processes pending share-to-download URLs.
@@ -83,6 +174,20 @@ class _BrowserScreenState extends State<BrowserScreen> {
   Future<void> _processPendingUrl(String url) async {
     _isProcessingPendingUrl = true;
     try {
+      final normalized = ShareUrlService.normalizeSharedUrl(url) ?? url;
+      if (!ShareUrlService.isSupportedWebUrl(normalized)) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'This shared link cannot be opened directly. Share a web URL from Facebook.',
+              ),
+            ),
+          );
+        }
+        return;
+      }
+
       // Pop any routes on top (DownloadsScreen, bottom sheets) so we're
       // back on BrowserScreen before showing the new media sheet.
       if (mounted) {
@@ -95,28 +200,66 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
       setState(() => _isShareToDownload = true);
 
-      final browserProvider =
-          Provider.of<BrowserProvider>(context, listen: false);
+      final browserProvider = Provider.of<BrowserProvider>(
+        context,
+        listen: false,
+      );
 
-      // Trigger stream detection for the shared URL
-      browserProvider.setCurrentUrl(url);
-      _currentUrl = url;
-      browserProvider.fetchYouTubeStreams(forceRefresh: true);
+      // Trigger detection for the shared URL.
+      // For non-YouTube platforms this must load the page in WebView first.
+      _loadUrl(normalized);
+      browserProvider.setCurrentUrl(normalized);
+      _currentUrl = normalized;
+
+      // Start extraction immediately so shared links do not require manual retries.
+      unawaited(
+        browserProvider.refreshCurrentPlatformMedia(
+          forceRefresh: true,
+          runHeadlessExtractor: true,
+        ),
+      );
+
+      // Retry once automatically if no streams are found from the first pass.
+      Future.delayed(const Duration(milliseconds: 1600), () {
+        if (!mounted) return;
+        if (browserProvider.hasDetectedMedia || browserProvider.isFetchingMedia) {
+          return;
+        }
+        unawaited(
+          browserProvider.refreshCurrentPlatformMedia(
+            forceRefresh: false,
+            runHeadlessExtractor: true,
+          ),
+        );
+      });
 
       // Give the fetch a moment to start so the sheet shows loading state
-      await Future.delayed(const Duration(milliseconds: 100));
+      await Future.delayed(const Duration(milliseconds: 120));
       if (!mounted) return;
 
       // Show the media selection sheet
       await _showMediaSheet(context, browserProvider);
 
-      // After sheet closes, navigate to Downloads screen
+      // After sheet closes, navigate to Downloads screen or exit if share
       if (_isShareToDownload && mounted) {
         setState(() => _isShareToDownload = false);
-        Navigator.push(
+
+        final hasActive = Provider.of<DownloadProvider>(
           context,
-          MaterialPageRoute(builder: (context) => const DownloadsScreen()),
-        );
+          listen: false,
+        ).hasActiveDownloads;
+        if (hasActive) {
+          // A download was started via share! Pop back to previous app.
+          try {
+            const platform = MethodChannel('com.rajesh.mediatube/app');
+            await platform.invokeMethod('moveToBackground');
+          } catch (_) {
+            SystemNavigator.pop();
+          }
+        } else {
+          // User probably cancelled, stay in app or pop?
+          // We'll just stay in app for safety.
+        }
       }
     } finally {
       _isProcessingPendingUrl = false;
@@ -128,22 +271,22 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 
   bool _isWebViewReady = false; // Tracks if WebView is fully created
+  bool _isUrlBarVisible = true;
+  int _lastScrollY = 0;
 
   void _loadUrl(String url) {
     if (url.isEmpty) return;
 
-    // Add https:// if no protocol specified
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      // Check if it looks like a URL or search query
-      if (url.contains('.') && !url.contains(' ')) {
-        url = 'https://$url';
-      } else {
-        // Treat as search query
-        url = 'https://www.google.com/search?q=${Uri.encodeComponent(url)}';
-      }
+    final normalizedUrl = UrlInputSanitizer.sanitizeToNavigableUrl(url);
+    if (normalizedUrl == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Only valid http/https URLs are allowed.')),
+      );
+      return;
     }
 
-    _currentUrl = url;
+    _currentUrl = normalizedUrl;
 
     if (_showHomePage) {
       // 1. IMMEDIATE UI UPDATE: Switch to WebView mode
@@ -156,12 +299,16 @@ class _BrowserScreenState extends State<BrowserScreen> {
       // This prevents the "freeze" because the main thread isn't blocked by generic initialization
       Future.delayed(const Duration(milliseconds: 100), () {
         if (_isWebViewReady && mounted) {
-          _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+          _webViewController?.loadUrl(
+            urlRequest: URLRequest(url: WebUri(normalizedUrl)),
+          );
         }
       });
     } else if (_isWebViewReady) {
       // WebView already exists and is ready
-      _webViewController?.loadUrl(urlRequest: URLRequest(url: WebUri(url)));
+      _webViewController?.loadUrl(
+        urlRequest: URLRequest(url: WebUri(normalizedUrl)),
+      );
     }
     // If WebView is being created but not ready yet, _currentUrl is already
     // set and will be used as initialUrlRequest
@@ -174,6 +321,21 @@ class _BrowserScreenState extends State<BrowserScreen> {
     // pendingUrl is now handled reactively via _checkAndProcessPendingUrl listener
 
     return Scaffold(
+      bottomNavigationBar: Selector<
+        BrowserProvider,
+        ({bool canGoBack, bool canGoForward, bool isLoading})
+      >(
+        selector: (_, provider) => (
+          canGoBack: provider.canGoBack,
+          canGoForward: provider.canGoForward,
+          isLoading: provider.isLoading,
+        ),
+        builder: (context, navState, _) => _buildNavigationBar(
+          canGoBack: navState.canGoBack,
+          canGoForward: navState.canGoForward,
+          isLoading: navState.isLoading,
+        ),
+      ),
       body: Stack(
         children: [
           // Main content
@@ -182,8 +344,25 @@ class _BrowserScreenState extends State<BrowserScreen> {
               children: [
                 // URL Bar (hide when showing home)
                 if (!_showHomePage)
-                  Consumer<BrowserProvider>(
-                    builder: (context, provider, _) => _buildUrlBar(provider),
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 200),
+                    height: _isUrlBarVisible ? 64.0 : 0.0,
+                    child: SingleChildScrollView(
+                      physics: const NeverScrollableScrollPhysics(),
+                      child: Selector<
+                        BrowserProvider,
+                        ({String currentUrl, int tabCount})
+                      >(
+                        selector: (_, provider) => (
+                          currentUrl: provider.currentUrl,
+                          tabCount: provider.tabs.length,
+                        ),
+                        builder: (context, data, _) => _buildUrlBar(
+                          currentUrl: data.currentUrl,
+                          tabCount: data.tabCount,
+                        ),
+                      ),
+                    ),
                   ),
 
                 // Content area
@@ -201,11 +380,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
                     ],
                   ),
                 ),
-
-                // Bottom navigation bar
-                Consumer<BrowserProvider>(
-                  builder: (context, provider, _) => _buildBottomBar(provider),
-                ),
               ],
             ),
           ),
@@ -222,12 +396,21 @@ class _BrowserScreenState extends State<BrowserScreen> {
             initialUrlRequest: URLRequest(url: WebUri(_currentUrl)),
             initialSettings: InAppWebViewSettings(
               javaScriptEnabled: true,
+              javaScriptCanOpenWindowsAutomatically: false,
+              supportMultipleWindows: false,
               mediaPlaybackRequiresUserGesture: false,
               allowsInlineMediaPlayback: true,
+              useShouldInterceptRequest: _requestInterceptionEnabled,
               useWideViewPort: true,
               loadWithOverviewMode: true,
               domStorageEnabled: true,
               databaseEnabled: true,
+              safeBrowsingEnabled: true,
+              allowFileAccess: false,
+              allowContentAccess: false,
+              allowFileAccessFromFileURLs: false,
+              allowUniversalAccessFromFileURLs: false,
+              mixedContentMode: MixedContentMode.MIXED_CONTENT_NEVER_ALLOW,
               supportZoom: true,
               builtInZoomControls: true,
               displayZoomControls: false,
@@ -239,23 +422,119 @@ class _BrowserScreenState extends State<BrowserScreen> {
               userAgent:
                   'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
             ),
+            onScrollChanged: (controller, x, y) {
+              if (y > _lastScrollY && y > 100) {
+                // Scrolling down, aggressively hide past 100px
+                if (_isUrlBarVisible) {
+                  setState(() => _isUrlBarVisible = false);
+                }
+              } else if (y < _lastScrollY || y < 50) {
+                // Scrolling up or near top, show
+                if (!_isUrlBarVisible) {
+                  setState(() => _isUrlBarVisible = true);
+                }
+              }
+              _lastScrollY = y;
+            },
             onWebViewCreated: (controller) {
               _webViewController = controller;
               _isWebViewReady = true;
+
+              final provider = context.read<BrowserProvider>();
+              unawaited(_syncRequestInterceptionMode(provider, force: true));
             },
             onLoadStart: (controller, url) {
-              Provider.of<BrowserProvider>(
-                context,
-                listen: false,
-              ).setLoading(true);
+              final provider = context.read<BrowserProvider>();
+              provider.setLoading(true);
+              unawaited(_syncRequestInterceptionMode(provider));
               _urlController.text = url?.toString() ?? '';
             },
+            shouldOverrideUrlLoading: (controller, navigationAction) async {
+              final rawUrl = navigationAction.request.url?.toString() ?? '';
+              if (rawUrl.isEmpty) {
+                return NavigationActionPolicy.ALLOW;
+              }
+
+              final uri = Uri.tryParse(rawUrl);
+              final scheme = uri?.scheme.toLowerCase();
+              if (scheme == 'http' || scheme == 'https') {
+                if (uri == null || uri.host.isEmpty) {
+                  return NavigationActionPolicy.CANCEL;
+                }
+                return NavigationActionPolicy.ALLOW;
+              }
+
+              if (scheme == null) {
+                return NavigationActionPolicy.CANCEL;
+              }
+
+              final normalizedUrl = ShareUrlService.normalizeSharedUrl(rawUrl);
+              if (normalizedUrl != null &&
+                  ShareUrlService.isSupportedWebUrl(normalizedUrl) &&
+                  UrlInputSanitizer.isHttpOrHttpsUrl(normalizedUrl)) {
+                controller.loadUrl(
+                  urlRequest: URLRequest(url: WebUri(normalizedUrl)),
+                );
+              }
+
+              return NavigationActionPolicy.CANCEL;
+            },
             onLoadStop: (controller, url) async {
-              final provider = Provider.of<BrowserProvider>(
-                context,
-                listen: false,
-              );
+              final provider = context.read<BrowserProvider>();
               provider.setLoading(false);
+
+              // For non-YouTube platforms, run a quick DOM scan for media URLs
+              // because many platforms hide direct links behind dynamic scripts.
+              try {
+                if (!provider.isYouTubePage) {
+                  final result = await controller.evaluateJavascript(
+                    source: '''
+                      (function() {
+                        var urls = [];
+                        function pushIfValid(u) {
+                          if (!u || typeof u !== 'string') return;
+                          if (u.startsWith('http')) urls.push(u);
+                        }
+
+                        var videos = document.getElementsByTagName('video');
+                        for (var i = 0; i < videos.length; i++) {
+                          pushIfValid(videos[i].src);
+                          pushIfValid(videos[i].currentSrc);
+                          var sources = videos[i].getElementsByTagName('source');
+                          for (var j = 0; j < sources.length; j++) {
+                            pushIfValid(sources[j].src);
+                          }
+                        }
+
+                        var metas = document.getElementsByTagName('meta');
+                        for (var k = 0; k < metas.length; k++) {
+                          var p = (metas[k].getAttribute('property') || '').toLowerCase();
+                          if (p === 'og:video' || p === 'og:video:url' || p === 'og:video:secure_url') {
+                            pushIfValid(metas[k].getAttribute('content'));
+                          }
+                        }
+
+                        return Array.from(new Set(urls));
+                      })();
+                    ''',
+                  );
+
+                  if (result is List) {
+                    provider.addExtractedMediaUrls(
+                      result.map((e) => e.toString()).toList(),
+                    );
+                  }
+
+                  if (provider.isSocialVideoPage && !provider.hasDetectedMedia) {
+                    provider.refreshCurrentPlatformMedia(
+                      forceRefresh: false,
+                      runHeadlessExtractor: true,
+                    );
+                  }
+                }
+              } catch (e) {
+                debugPrint('DOM media scan failed: $e');
+              }
 
               // Update navigation state
               final canGoBack = await controller.canGoBack();
@@ -264,37 +543,45 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 canGoBack: canGoBack,
                 canGoForward: canGoForward,
               );
+
+              unawaited(_syncRequestInterceptionMode(provider));
             },
             onTitleChanged: (controller, title) {
-              Provider.of<BrowserProvider>(
-                context,
-                listen: false,
-              ).setPageTitle(title ?? '');
+              context.read<BrowserProvider>().setPageTitle(title ?? '');
             },
             onLoadResource: (controller, resource) {
-              final url = resource.url?.toString() ?? '';
-              if (url.isNotEmpty) {
-                Provider.of<BrowserProvider>(
-                  context,
-                  listen: false,
-                ).onResourceLoaded(url);
+              // No-op: shouldInterceptRequest already feeds the sniffer.
+            },
+            shouldInterceptRequest: (controller, request) async {
+              final provider = context.read<BrowserProvider>();
+              if (!provider.shouldObserveNetworkMedia) {
+                return null;
               }
+
+              final url = request.url.toString();
+              if (url.isEmpty) return null;
+
+              String? contentTypeHint;
+              final acceptHeader = request.headers?['Accept'] ?? request.headers?['accept'];
+              if (acceptHeader != null && acceptHeader.isNotEmpty) {
+                contentTypeHint = acceptHeader;
+              }
+
+              provider.onResourceLoaded(url, contentType: contentTypeHint);
+
+              return null;
             },
             onUpdateVisitedHistory: (controller, url, isReload) {
               final urlStr = url?.toString() ?? '';
               if (urlStr.isNotEmpty) {
-                Provider.of<BrowserProvider>(
-                  context,
-                  listen: false,
-                ).setCurrentUrl(urlStr);
+                final provider = context.read<BrowserProvider>();
+                provider.setCurrentUrl(urlStr);
+                unawaited(_syncRequestInterceptionMode(provider));
                 _urlController.text = urlStr;
               }
             },
             onProgressChanged: (controller, progress) {
-              Provider.of<BrowserProvider>(
-                context,
-                listen: false,
-              ).setLoading(progress < 100);
+              context.read<BrowserProvider>().setLoading(progress < 100);
             },
           ),
         ),
@@ -302,26 +589,45 @@ class _BrowserScreenState extends State<BrowserScreen> {
         // Loading indicator - Rebuilds ONLY when isLoading changes
         Selector<BrowserProvider, bool>(
           selector: (_, provider) => provider.isLoading,
-          builder: (_, isLoading, __) => isLoading
+          builder: (context, isLoading, child) => isLoading
               ? const LinearProgressIndicator()
               : const SizedBox.shrink(),
         ),
 
-        // Floating download button - Rebuilds when media detection state changes
-        Consumer<BrowserProvider>(
-          builder: (context, browserProvider, _) {
-            if (browserProvider.hasDetectedMedia ||
-                browserProvider.isYouTubePage ||
-                browserProvider.hasFetchError) {
+        // Floating download button - only rebuild on button-relevant state
+        Selector<
+          BrowserProvider,
+          ({
+            bool hasDetectedMedia,
+            bool isYouTubePage,
+            bool hasFetchError,
+            int mediaCount,
+            bool isFetchingMedia,
+          })
+        >(
+          selector: (_, browserProvider) => (
+            hasDetectedMedia: browserProvider.hasDetectedMedia,
+            isYouTubePage: browserProvider.isYouTubePage,
+            hasFetchError: browserProvider.hasFetchError,
+            mediaCount: browserProvider.detectedMedia.length,
+            isFetchingMedia: browserProvider.isFetchingMedia,
+          ),
+          builder: (context, state, _) {
+            if (state.hasDetectedMedia ||
+                state.isYouTubePage ||
+                state.hasFetchError) {
               return Positioned(
                 right: 16,
                 bottom: 16,
                 child: FloatingDownloadButton(
-                  mediaCount: browserProvider.detectedMedia.length,
-                  isYouTube: browserProvider.isYouTubePage,
-                  isFetching: browserProvider.isFetchingYouTube,
-                  hasError: browserProvider.hasFetchError,
-                  onPressed: () => _showMediaSheet(context, browserProvider),
+                  mediaCount: state.mediaCount,
+                  isYouTube: state.isYouTubePage,
+                  isFetching: state.isFetchingMedia,
+                  hasError: state.hasFetchError,
+                  onPressed: () => _showMediaSheet(
+                    context,
+                    context.read<BrowserProvider>(),
+                  ),
                 ),
               );
             }
@@ -340,7 +646,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
     _urlController.text = '';
   }
 
-  Widget _buildUrlBar(BrowserProvider browserProvider) {
+  Widget _buildUrlBar({
+    required String currentUrl,
+    required int tabCount,
+  }) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       color: Theme.of(context).colorScheme.surface,
@@ -356,11 +665,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 children: [
                   const SizedBox(width: 12),
                   Icon(
-                    browserProvider.currentUrl.startsWith('https')
+                    currentUrl.startsWith('https')
                         ? Icons.lock
                         : Icons.language,
                     size: 18,
-                    color: browserProvider.currentUrl.startsWith('https')
+                    color: currentUrl.startsWith('https')
                         ? Colors.green
                         : null,
                   ),
@@ -397,140 +706,237 @@ class _BrowserScreenState extends State<BrowserScreen> {
             ),
           ),
           const SizedBox(width: 8),
-          // Downloads button
-          IconButton(
-            icon: Stack(
-              children: [
-                const Icon(Icons.download),
-                Consumer<DownloadProvider>(
-                  builder: (context, downloadProvider, _) {
-                    if (downloadProvider.hasActiveDownloads) {
-                      return Positioned(
-                        right: 0,
-                        top: 0,
-                        child: Container(
-                          padding: const EdgeInsets.all(2),
-                          decoration: BoxDecoration(
-                            color: Colors.red,
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          constraints: const BoxConstraints(
-                            minWidth: 12,
-                            minHeight: 12,
-                          ),
-                          child: Text(
-                            '${downloadProvider.activeDownloads.length}',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 8,
-                            ),
-                            textAlign: TextAlign.center,
-                          ),
-                        ),
-                      );
-                    }
-                    return const SizedBox.shrink();
-                  },
+          // Tabs Button
+          Stack(
+            alignment: Alignment.center,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.filter_none),
+                onPressed: () =>
+                    _showTabsSheet(context, context.read<BrowserProvider>()),
+              ),
+              Positioned(
+                child: IgnorePointer(
+                  child: Text(
+                    '$tabCount',
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                      color: Theme.of(context).colorScheme.onSurface,
+                    ),
+                  ),
                 ),
-              ],
-            ),
-            onPressed: () => _openDownloadsScreen(context),
+              ),
+            ],
           ),
         ],
       ),
     );
   }
 
-  Widget _buildBottomBar(BrowserProvider browserProvider) {
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withAlpha(20),
-            blurRadius: 8,
-            offset: const Offset(0, -2),
-          ),
-        ],
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          IconButton(
-            icon: const Icon(Icons.arrow_back),
-            onPressed: (_showHomePage || !browserProvider.canGoBack)
-                ? null
-                : () => _webViewController?.goBack(),
-          ),
-          IconButton(
-            icon: const Icon(Icons.arrow_forward),
-            onPressed: (_showHomePage || !browserProvider.canGoForward)
-                ? null
-                : () => _webViewController?.goForward(),
-          ),
-          Container(
-            decoration: _showHomePage
-                ? BoxDecoration(
-                    color: Theme.of(context).colorScheme.primaryContainer,
-                    borderRadius: BorderRadius.circular(20),
-                  )
-                : null,
-            child: IconButton(
-              icon: Icon(
-                Icons.home,
-                color: _showHomePage
-                    ? Theme.of(context).colorScheme.primary
-                    : null,
-              ),
-              onPressed: _goHome,
-            ),
-          ),
-          IconButton(
-            icon: Icon(
-              _showHomePage
-                  ? Icons.refresh
-                  : (browserProvider.isLoading ? Icons.close : Icons.refresh),
-            ),
-            onPressed: _showHomePage
-                ? null
-                : () {
-                    if (browserProvider.isLoading) {
-                      _webViewController?.stopLoading();
-                    } else {
-                      _webViewController?.reload();
-                    }
-                  },
-          ),
-          IconButton(
-            icon: Stack(
+  void _showTabsSheet(BuildContext context, BrowserProvider provider) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (context) {
+        return DraggableScrollableSheet(
+          initialChildSize: 0.6,
+          minChildSize: 0.4,
+          maxChildSize: 0.9,
+          expand: false,
+          builder: (context, scrollController) {
+            return Column(
               children: [
-                const Icon(Icons.download),
-                Consumer<DownloadProvider>(
-                  builder: (context, downloadProvider, _) {
-                    if (downloadProvider.hasActiveDownloads) {
-                      return Positioned(
-                        right: 0,
-                        top: 0,
-                        child: Container(
-                          width: 8,
-                          height: 8,
-                          decoration: const BoxDecoration(
-                            color: Colors.red,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
+                Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'Tabs (${provider.tabs.length})',
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.add),
+                        onPressed: () {
+                          provider.addNewTab();
+                          Navigator.pop(context);
+                          _loadUrl('https://google.com'); // load default
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+                const Divider(height: 1),
+                Expanded(
+                  child: Consumer<BrowserProvider>(
+                    builder: (context, currentProvider, _) {
+                      return ListView.builder(
+                        controller: scrollController,
+                        itemCount: currentProvider.tabs.length,
+                        itemBuilder: (context, index) {
+                          final tab = currentProvider.tabs[index];
+                          final isActive =
+                              index == currentProvider.activeTabIndex;
+                          return ListTile(
+                            leading: Icon(
+                              Icons.public,
+                              color: isActive
+                                  ? Theme.of(context).colorScheme.primary
+                                  : null,
+                            ),
+                            title: Text(
+                              tab.title.isEmpty ? tab.url : tab.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontWeight: isActive
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                                color: isActive
+                                    ? Theme.of(context).colorScheme.primary
+                                    : null,
+                              ),
+                            ),
+                            subtitle: Text(
+                              tab.url,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            trailing: IconButton(
+                              icon: const Icon(Icons.close),
+                              onPressed: () {
+                                currentProvider.closeTab(index);
+                                if (currentProvider.tabs.isEmpty) {
+                                  Navigator.pop(context);
+                                }
+                              },
+                            ),
+                            onTap: () {
+                              currentProvider.switchTab(index);
+                              Navigator.pop(context);
+                              _loadUrl(
+                                currentProvider.currentUrl,
+                              ); // re-trigger load for context
+                            },
+                          );
+                        },
                       );
-                    }
-                    return const SizedBox.shrink();
-                  },
+                    },
+                  ),
                 ),
               ],
-            ),
-            onPressed: () => _openDownloadsScreen(context),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildNavigationBar({
+    required bool canGoBack,
+    required bool canGoForward,
+    required bool isLoading,
+  }) {
+    // Current "selected" index logic based on state
+    int selectedIndex = _showHomePage
+        ? 2
+        : 0; // Default to Home or just a generic unselected state if possible
+
+    return NavigationBar(
+      selectedIndex: selectedIndex,
+      onDestinationSelected: (int index) {
+        switch (index) {
+          case 0:
+            if (!_showHomePage && canGoBack) {
+              _webViewController?.goBack();
+            }
+            break;
+          case 1:
+            if (!_showHomePage && canGoForward) {
+              _webViewController?.goForward();
+            }
+            break;
+          case 2:
+            _goHome();
+            break;
+          case 3:
+            if (!_showHomePage) {
+              if (isLoading) {
+                _webViewController?.stopLoading();
+              } else {
+                _webViewController?.reload();
+              }
+            }
+            break;
+          case 4:
+            _openDownloadsScreen(context);
+            break;
+        }
+      },
+      destinations: [
+        NavigationDestination(
+          icon: Icon(
+            Icons.arrow_back,
+            color: (!_showHomePage && canGoBack)
+                ? null
+                : Theme.of(context).disabledColor,
           ),
-        ],
-      ),
+          label: 'Back',
+        ),
+        NavigationDestination(
+          icon: Icon(
+            Icons.arrow_forward,
+            color: (!_showHomePage && canGoForward)
+                ? null
+                : Theme.of(context).disabledColor,
+          ),
+          label: 'Forward',
+        ),
+        NavigationDestination(
+          icon: Icon(
+            Icons.home,
+            color: _showHomePage ? Theme.of(context).colorScheme.primary : null,
+          ),
+          label: 'Home',
+        ),
+        NavigationDestination(
+          icon: Icon(
+            _showHomePage
+                ? Icons.refresh
+                : (isLoading ? Icons.close : Icons.refresh),
+            color: _showHomePage ? Theme.of(context).disabledColor : null,
+          ),
+          label: isLoading ? 'Stop' : 'Refresh',
+        ),
+        NavigationDestination(
+          icon: Stack(
+            children: [
+              const Icon(Icons.download),
+              Consumer<DownloadProvider>(
+                builder: (context, downloadProvider, _) {
+                  if (downloadProvider.hasActiveDownloads) {
+                    return Positioned(
+                      right: 0,
+                      top: 0,
+                      child: Container(
+                        width: 8,
+                        height: 8,
+                        decoration: const BoxDecoration(
+                          color: Colors.red,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                    );
+                  }
+                  return const SizedBox.shrink();
+                },
+              ),
+            ],
+          ),
+          label: 'Downloads',
+        ),
+      ],
     );
   }
 
@@ -567,10 +973,10 @@ class _CachedMediaSheet extends StatelessWidget {
         return MediaSelectionSheet(
           media: browserProvider.detectedMedia,
           isYouTube: browserProvider.isYouTubePage,
-          isFetching: browserProvider.isFetchingYouTube,
+          isFetching: browserProvider.isFetchingMedia,
           errorMessage: browserProvider.fetchError,
           onRefresh: () =>
-              browserProvider.fetchYouTubeStreams(forceRefresh: true),
+              browserProvider.refreshCurrentPlatformMedia(forceRefresh: true),
         );
       },
     );

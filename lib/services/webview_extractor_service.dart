@@ -2,17 +2,104 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import '../models/detected_media.dart';
+import 'media_sniffer_service.dart';
 
 /// A service to extract media from platforms unsupported by NewPipe (e.g., TikTok, Instagram).
 /// This provides a skeleton for a headless InAppWebView to navigate to a URL and intercept
 /// network traffic looking for .mp4 or .m3u8 CDN links dynamically.
 class WebViewExtractorService {
   HeadlessInAppWebView? _headlessWebView;
+  final MediaSnifferService _sniffer = MediaSnifferService();
+  static const Duration _overallTimeout = Duration(seconds: 10);
+  static const List<Duration> _domScanDelays = [
+    Duration(milliseconds: 200),
+    Duration(milliseconds: 450),
+    Duration(milliseconds: 700),
+    Duration(milliseconds: 1100),
+  ];
+
+  void _addMediaIfNew(List<DetectedMedia> mediaList, DetectedMedia media) {
+    final exists = mediaList.any((m) => m.url == media.url);
+    if (!exists) {
+      mediaList.add(media);
+    }
+  }
+
+  Future<void> _scanDomForMedia(
+    InAppWebViewController controller,
+    List<DetectedMedia> mediaList,
+    String title,
+  ) async {
+    final result = await controller.evaluateJavascript(
+      source: """
+        (function() {
+          function toAbsolute(value) {
+            if (!value) return null;
+            try {
+              return new URL(value, window.location.href).toString();
+            } catch (e) {
+              return value;
+            }
+          }
+
+          var videos = document.querySelectorAll('video, source');
+          var metas = document.querySelectorAll('meta[property="og:video"], meta[property="og:video:url"], meta[property="twitter:player:stream"]');
+          var urls = [];
+          for(var i=0; i<videos.length; i++) {
+            if(videos[i].src) urls.push(toAbsolute(videos[i].src));
+          }
+
+          for (var m=0; m<metas.length; m++) {
+            var metaUrl = metas[m].getAttribute('content');
+            if (metaUrl) urls.push(toAbsolute(metaUrl));
+          }
+
+          var anchors = document.querySelectorAll('a[href*=".mp4"], a[href*=".m3u8"], a[href*="video"]');
+          for (var a=0; a<anchors.length; a++) {
+            var href = anchors[a].getAttribute('href');
+            if (href) urls.push(toAbsolute(href));
+          }
+
+          return Array.from(new Set(urls.filter(Boolean)));
+        })();
+      """,
+    );
+
+    if (result != null && result is List && result.isNotEmpty) {
+      for (var src in result) {
+        final detected = _sniffer.detectMedia(
+          src.toString(),
+          pageTitle: title,
+        );
+        if (detected != null) {
+          _addMediaIfNew(mediaList, detected);
+        }
+      }
+    }
+  }
 
   /// Extract media from a generic URL using a hidden browser
   Future<List<DetectedMedia>> extractMedia(String url) async {
     final completer = Completer<List<DetectedMedia>>();
     final List<DetectedMedia> mediaList = [];
+    final startedAt = DateTime.now();
+
+    void completeExtraction({bool force = false}) {
+      if (completer.isCompleted) return;
+      if (!force && mediaList.isEmpty) return;
+      completer.complete(List<DetectedMedia>.from(mediaList));
+    }
+
+    void maybeCompleteEarly() {
+      final elapsed = DateTime.now().difference(startedAt);
+      if (mediaList.length >= 2) {
+        completeExtraction();
+        return;
+      }
+      if (mediaList.isNotEmpty && elapsed >= const Duration(milliseconds: 1200)) {
+        completeExtraction();
+      }
+    }
 
     _headlessWebView = HeadlessInAppWebView(
       initialUrlRequest: URLRequest(url: WebUri(url)),
@@ -23,86 +110,49 @@ class WebViewExtractorService {
         mediaPlaybackRequiresUserGesture: false,
       ),
       onLoadStop: (controller, url) async {
-        // Wait for dynamic content
-        await Future.delayed(const Duration(seconds: 3));
-
         final title = await controller.getTitle() ?? 'Extracted Video';
 
-        if (mediaList.isNotEmpty) {
-          if (!completer.isCompleted) completer.complete(mediaList);
-        } else {
-          // JS Fallback for <video> tags
-          try {
-            final result = await controller.evaluateJavascript(
-              source: """
-              (function() {
-                var videos = document.getElementsByTagName('video');
-                var urls = [];
-                for(var i=0; i<videos.length; i++) {
-                  if(videos[i].src) urls.push(videos[i].src);
-                  else {
-                    var sources = videos[i].getElementsByTagName('source');
-                    if(sources.length > 0 && sources[0].src) urls.push(sources[0].src);
-                  }
-                }
-                return urls;
-              })();
-            """,
-            );
-
-            if (result != null && result is List && result.isNotEmpty) {
-              for (var src in result) {
-                mediaList.add(
-                  DetectedMedia(
-                    url: src.toString(),
-                    title: title,
-                    type: MediaType.video,
-                    source: MediaSource.generic,
-                    format: 'mp4',
-                    quality: 'Default',
-                  ),
-                );
-              }
-            }
-          } catch (e) {
-            debugPrint('JS extraction failed: $e');
+        try {
+          for (final delay in _domScanDelays) {
+            if (completer.isCompleted) break;
+            await Future.delayed(delay);
+            await _scanDomForMedia(controller, mediaList, title);
+            maybeCompleteEarly();
           }
-
-          if (!completer.isCompleted) completer.complete(mediaList);
+        } catch (e) {
+          debugPrint('JS extraction failed: $e');
+        } finally {
+          completeExtraction(force: true);
         }
       },
       shouldInterceptRequest: (controller, request) async {
         final reqUrl = request.url.toString();
-        // Intercept common video formats dynamically
-        if (reqUrl.contains('.mp4') || reqUrl.contains('.m3u8')) {
-          if (!mediaList.any((m) => m.url == reqUrl)) {
-            mediaList.add(
-              DetectedMedia(
-                url: reqUrl,
-                title: 'Intercepted Video',
-                type: MediaType.video,
-                source: MediaSource.generic,
-                format: reqUrl.contains('.m3u8') ? 'm3u8' : 'mp4',
-                quality: 'Stream',
-              ),
-            );
-          }
+        final detected = _sniffer.detectMedia(
+          reqUrl,
+          pageTitle: 'Intercepted Video',
+        );
+        if (detected != null) {
+          _addMediaIfNew(mediaList, detected);
+          maybeCompleteEarly();
         }
         return null; // Return null to let request proceed
       },
     );
 
-    await _headlessWebView?.run();
+    try {
+      await _headlessWebView?.run();
+    } catch (e) {
+      debugPrint('Headless extractor run failed: $e');
+      completeExtraction(force: true);
+    }
 
     // Safety timeout
-    Future.delayed(const Duration(seconds: 15), () {
-      if (!completer.isCompleted) {
-        completer.complete(mediaList);
-        _headlessWebView?.dispose();
-      }
+    final timeoutTimer = Timer(_overallTimeout, () {
+      completeExtraction(force: true);
     });
 
     final result = await completer.future;
+    timeoutTimer.cancel();
     _headlessWebView?.dispose();
     return result;
   }

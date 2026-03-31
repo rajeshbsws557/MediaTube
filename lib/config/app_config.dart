@@ -13,8 +13,14 @@ class AppConfig {
   /// For Android emulator: 'http://10.0.2.2:5000'
   /// For physical device on same network: 'http://YOUR_LOCAL_IP:5000'
   /// For production: 'https://your-server.com'
-  /// Backend server URL (Legacy/Fallback)
-  static const String backendBaseUrl = 'http://192.168.1.147:5000';
+    /// Backend server URL (Legacy/Fallback)
+    ///
+    /// Keep this HTTPS by default. Override at build time for local debugging:
+    /// flutter run --dart-define=BACKEND_BASE_URL=http://10.0.2.2:5000
+    static const String backendBaseUrl = String.fromEnvironment(
+        'BACKEND_BASE_URL',
+        defaultValue: 'https://your-server.com',
+    );
 
   /// GitHub repository owner
   static const String githubRepoOwner = 'rajeshbsws557';

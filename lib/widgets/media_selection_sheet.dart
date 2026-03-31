@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../models/models.dart';
 import '../providers/providers.dart';
@@ -25,6 +26,8 @@ class MediaSelectionSheet extends StatefulWidget {
 
 class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
   bool _isRefreshing = false;
+  MediaType _selectedType = MediaType.video;
+  static const int _maxBatchQueue = 10;
 
   void _handleRefresh() async {
     if (_isRefreshing || widget.isFetching) return;
@@ -126,7 +129,13 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
               ),
 
               // Quick download button for best quality
-              if (widget.media.isNotEmpty) _buildQuickDownloadBar(context),
+              if (widget.media.isNotEmpty) ...[
+                _buildHeroThumbnail(),
+                const SizedBox(height: 16),
+                _buildTypeToggle(),
+                const SizedBox(height: 8),
+                _buildQuickDownloadBar(context),
+              ],
 
               const Divider(height: 1),
 
@@ -144,6 +153,67 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildHeroThumbnail() {
+    final firstMedia = widget.media.firstOrNull;
+    if (firstMedia?.thumbnailUrl == null) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: AspectRatio(
+          aspectRatio: 16 / 9,
+          child: Image.network(
+            firstMedia!.thumbnailUrl!,
+            fit: BoxFit.cover,
+            errorBuilder: (context, error, stackTrace) => Container(
+              color: Colors.grey[200],
+              child: const Icon(
+                Icons.broken_image,
+                size: 48,
+                color: Colors.grey,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTypeToggle() {
+    final hasVideo = widget.media.any((m) => m.type == MediaType.video);
+    final hasAudio = widget.media.any((m) => m.type == MediaType.audio);
+
+    if (!hasVideo || !hasAudio) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: SizedBox(
+        width: double.infinity,
+        child: SegmentedButton<MediaType>(
+          segments: const [
+            ButtonSegment(
+              value: MediaType.video,
+              icon: Icon(Icons.movie),
+              label: Text('Video'),
+            ),
+            ButtonSegment(
+              value: MediaType.audio,
+              icon: Icon(Icons.music_note),
+              label: Text('Audio'),
+            ),
+          ],
+          selected: {_selectedType},
+          onSelectionChanged: (Set<MediaType> newSelection) {
+            setState(() {
+              _selectedType = newSelection.first;
+            });
+          },
+        ),
+      ),
     );
   }
 
@@ -182,18 +252,25 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
           Text(
             widget.isYouTube
                 ? 'Navigate to a YouTube video to see available streams'
-                : 'No media detected on this page',
+                : 'No media detected on this page yet',
             textAlign: TextAlign.center,
             style: TextStyle(color: Colors.grey[600]),
           ),
-          if (widget.isYouTube) ...[
-            const SizedBox(height: 16),
-            OutlinedButton.icon(
-              onPressed: _handleRefresh,
-              icon: const Icon(Icons.refresh),
-              label: const Text('Fetch Streams'),
+          const SizedBox(height: 16),
+          OutlinedButton.icon(
+            onPressed: _handleRefresh,
+            icon: const Icon(Icons.refresh),
+            label: Text(widget.isYouTube ? 'Fetch Streams' : 'Scan Page Again'),
+          ),
+          if (!widget.isYouTube)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                'Tip: play the video once, then tap Scan Page Again.',
+                style: TextStyle(color: Colors.grey[500], fontSize: 12),
+                textAlign: TextAlign.center,
+              ),
             ),
-          ],
         ],
       ),
     );
@@ -262,26 +339,108 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
 
     if (bestVideo == null) return const SizedBox.shrink();
 
+    final batchCandidates = widget.media
+        .where((m) => m.type == _selectedType)
+        .toList();
+
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: ElevatedButton.icon(
-        onPressed: () => _quickDownload(context, bestVideo!),
-        icon: const Icon(Icons.download),
-        label: Text(
-          'Download ${bestVideo.quality ?? "Video"} ${bestVideo.isDash ? "(DASH)" : ""}',
-        ),
-        style: ElevatedButton.styleFrom(
-          minimumSize: const Size(double.infinity, 48),
-          backgroundColor: Theme.of(context).colorScheme.primary,
-          foregroundColor: Theme.of(context).colorScheme.onPrimary,
-        ),
+      child: Column(
+        children: [
+          ElevatedButton.icon(
+            onPressed: () => _quickDownload(context, bestVideo!),
+            icon: const Icon(Icons.download),
+            label: Text(
+              'Download ${bestVideo.quality ?? "Video"} ${bestVideo.isDash ? "(DASH)" : ""}',
+            ),
+            style: ElevatedButton.styleFrom(
+              minimumSize: const Size(double.infinity, 48),
+              backgroundColor: Theme.of(context).colorScheme.primary,
+              foregroundColor: Theme.of(context).colorScheme.onPrimary,
+            ),
+          ),
+          if (batchCandidates.length > 1) ...[
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: () => _downloadAllOfType(context),
+              icon: const Icon(Icons.playlist_add_check),
+              label: Text(
+                'Download all ${_selectedType == MediaType.video ? "videos" : "audio"} (${batchCandidates.length})',
+              ),
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size(double.infinity, 44),
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }
 
-  void _quickDownload(BuildContext context, DetectedMedia media) {
+  Future<void> _downloadAllOfType(BuildContext context) async {
     final downloadProvider = context.read<DownloadProvider>();
-    downloadProvider.startDownload(media);
+    final selected = widget.media.where((m) => m.type == _selectedType).toList();
+    final queue = selected.take(_maxBatchQueue).toList();
+
+    var queuedCount = 0;
+    try {
+      for (final media in queue) {
+        await downloadProvider.startDownload(media);
+        queuedCount++;
+        await Future.delayed(const Duration(milliseconds: 40));
+      }
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed while queuing downloads: $e'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
+    if (!context.mounted) return;
+    Navigator.pop(context);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            const Icon(Icons.playlist_add_check, color: Colors.white, size: 20),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                selected.length > _maxBatchQueue
+                    ? 'Queued first $queuedCount of ${selected.length} items'
+                    : 'Queued $queuedCount ${_selectedType == MediaType.video ? "videos" : "audio files"}',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+        ),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _quickDownload(BuildContext context, DetectedMedia media) async {
+    final downloadProvider = context.read<DownloadProvider>();
+    try {
+      await downloadProvider.startDownload(media);
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to start download: $e'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
+    if (!context.mounted) return;
     Navigator.pop(context);
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -305,13 +464,37 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
   }
 
   Widget _buildMediaList(ScrollController scrollController) {
-    // Group media by type for better organization
-    final videos = widget.media
-        .where((m) => m.type == MediaType.video)
+    // Filter media by selected type
+    final filteredMedia = widget.media
+        .where((m) => m.type == _selectedType)
         .toList();
-    final audio = widget.media.where((m) => m.type == MediaType.audio).toList();
 
-    return ListView(
+    if (filteredMedia.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                _selectedType == MediaType.video
+                    ? Icons.videocam_off
+                    : Icons.music_off,
+                size: 48,
+                color: Colors.grey[400],
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'No ${_selectedType == MediaType.video ? "video" : "audio"} streams available',
+                style: TextStyle(color: Colors.grey[600]),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return ListView.builder(
       controller: scrollController,
       padding: const EdgeInsets.only(bottom: 16),
       // Performance optimizations for smooth 60fps scrolling
@@ -319,40 +502,12 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
       physics: const BouncingScrollPhysics(
         parent: AlwaysScrollableScrollPhysics(),
       ),
-      children: [
-        // Video section
-        if (videos.isNotEmpty) ...[
-          _buildSectionHeader('Video', Icons.movie, videos.length),
-          ...videos.map(
-            (m) => RepaintBoundary(child: _MediaListItem(media: m)),
-          ),
-        ],
-        // Audio section
-        if (audio.isNotEmpty) ...[
-          _buildSectionHeader('Audio', Icons.music_note, audio.length),
-          ...audio.map((m) => RepaintBoundary(child: _MediaListItem(media: m))),
-        ],
-      ],
-    );
-  }
-
-  Widget _buildSectionHeader(String title, IconData icon, int count) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-      child: Row(
-        children: [
-          Icon(icon, size: 16, color: Colors.grey[600]),
-          const SizedBox(width: 8),
-          Text(
-            '$title ($count)',
-            style: TextStyle(
-              color: Colors.grey[600],
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
+      itemCount: filteredMedia.length,
+      itemBuilder: (context, index) {
+        return RepaintBoundary(
+          child: _MediaListItem(media: filteredMedia[index]),
+        );
+      },
     );
   }
 }
@@ -461,7 +616,7 @@ class _MediaListItemState extends State<_MediaListItem> {
                     ),
                   );
                 },
-                errorBuilder: (_, __, ___) => _buildIcon(),
+                errorBuilder: (context, error, stackTrace) => _buildIcon(),
               ),
             )
           : _buildIcon(),
@@ -500,38 +655,48 @@ class _MediaListItemState extends State<_MediaListItem> {
   }
 
   Future<void> _startDownload(DownloadProvider downloadProvider) async {
+    if (!mounted || _isDownloading) return;
     setState(() => _isDownloading = true);
+    HapticFeedback.lightImpact();
 
-    // Await to ensure background service is initialized before we potentially close
-    await downloadProvider.startDownload(widget.media);
+    try {
+      // Await to ensure background service is initialized before closing sheet.
+      await downloadProvider.startDownload(widget.media);
 
-    if (!mounted) return;
-
-    // Close sheet after short delay to show button state change
-    Future.delayed(const Duration(milliseconds: 200), () {
-      if (mounted) {
-        Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Row(
-              children: [
-                const Icon(Icons.download, color: Colors.white, size: 20),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Text(
-                    'Downloading: ${widget.media.title}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+      if (!mounted) return;
+      Navigator.pop(context);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(Icons.download, color: Colors.white, size: 20),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'Downloading: ${widget.media.title}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
-              ],
-            ),
-            behavior: SnackBarBehavior.floating,
-            duration: const Duration(seconds: 2),
+              ),
+            ],
           ),
-        );
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to start download: $e'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _isDownloading = false);
       }
-    });
+    }
   }
 
   IconData _getTypeIcon() {

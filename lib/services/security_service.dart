@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import '../config/app_config.dart';
 
@@ -19,6 +20,7 @@ class SecurityService {
     try {
       // 1. Verify Package Name
       final packageInfo = await PackageInfo.fromPlatform();
+      if (!context.mounted) return false;
       if (packageInfo.packageName != AppConfig.expectedPackageName) {
         debugPrint('❌ Security Alert: Package name mismatch!');
         debugPrint('Expected: ${AppConfig.expectedPackageName}');
@@ -32,6 +34,7 @@ class SecurityService {
         final String signature = await _platform.invokeMethod(
           'getAppSignature',
         );
+        if (!context.mounted) return false;
 
         debugPrint('🔐 App Signature SHA-256: $signature');
 
@@ -62,12 +65,22 @@ class SecurityService {
         return true;
       } on PlatformException catch (e) {
         debugPrint('⚠️ Failed to get signature: ${e.message}');
-        // On non-Android or error, failing open for now to avoid locking legitimate users if API fails
+        if (!context.mounted) return false;
+        if (kReleaseMode) {
+          _showCompromisedDialog(context, 'Signature verification unavailable');
+          return false;
+        }
+        // In debug/profile allow development flows when platform channel is unavailable.
         return true;
       }
     } catch (e) {
       debugPrint('❌ Security check failed: $e');
-      return true; // Fail open to avoid crashes
+      if (!context.mounted) return false;
+      if (kReleaseMode) {
+        _showCompromisedDialog(context, 'Integrity check failed');
+        return false;
+      }
+      return true;
     }
   }
 
@@ -100,7 +113,7 @@ class SecurityService {
             ),
             const SizedBox(height: 8),
             Text('Reason: $reason'),
-            if (actual != null) ...[
+            if (!kReleaseMode && actual != null) ...[
               const SizedBox(height: 16),
               const Text(
                 'Debugging Info (Dev Only):',

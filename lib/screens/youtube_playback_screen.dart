@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
@@ -25,6 +27,11 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
 
   final ProcessNotificationService _processNotifications =
       ProcessNotificationService();
+  final BackgroundDownloadService _backgroundService =
+      BackgroundDownloadService();
+
+  DateTime _lastUiRefreshAt = DateTime.fromMillisecondsSinceEpoch(0);
+  bool? _lastKnownIsPlaying;
 
   bool get _isAudioOnly => widget.media.type == MediaType.audio;
 
@@ -32,14 +39,23 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _processNotifications.setPlaybackActionHandler(
+      _handlePlaybackNotificationAction,
+    );
     _initializePlayer();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _processNotifications.clearPlaybackStatus();
-    _controller?.dispose();
+    _processNotifications.setPlaybackActionHandler(null);
+    unawaited(_processNotifications.clearPlaybackStatus());
+    unawaited(_backgroundService.stopPlaybackService());
+    final controller = _controller;
+    if (controller != null) {
+      controller.removeListener(_onControllerTick);
+      controller.dispose();
+    }
     super.dispose();
   }
 
@@ -48,7 +64,12 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     if (state == AppLifecycleState.resumed) {
       final controller = _controller;
       if (controller != null && controller.value.isInitialized) {
-        _publishPlaybackNotification();
+        unawaited(
+          _syncPlaybackRuntimeState(
+            isPlaying: controller.value.isPlaying,
+            force: true,
+          ),
+        );
       }
     }
   }
@@ -77,7 +98,7 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
       controller.addListener(_onControllerTick);
 
       _controller = controller;
-      await _publishPlaybackNotification();
+      await _syncPlaybackRuntimeState(isPlaying: true, force: true);
 
       if (!mounted) {
         return;
@@ -107,19 +128,85 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
       return;
     }
 
-    // Keep the playback notification synchronized with runtime state.
-    if (controller.value.isPlaying) {
-      _publishPlaybackNotification();
+    final isPlaying = controller.value.isPlaying;
+    if (_lastKnownIsPlaying != isPlaying) {
+      unawaited(_syncPlaybackRuntimeState(isPlaying: isPlaying, force: true));
     }
 
-    setState(() {});
+    final now = DateTime.now();
+    final shouldRefreshUi =
+        now.difference(_lastUiRefreshAt) >= const Duration(milliseconds: 220) ||
+        controller.value.position >= controller.value.duration;
+
+    if (shouldRefreshUi) {
+      _lastUiRefreshAt = now;
+      setState(() {});
+    }
   }
 
-  Future<void> _publishPlaybackNotification() async {
+  Future<void> _publishPlaybackNotification({required bool isPlaying}) async {
     await _processNotifications.showPlaybackStatus(
       title: widget.media.title,
       isVideo: !_isAudioOnly,
+      isPlaying: isPlaying,
     );
+  }
+
+  Future<void> _syncPlaybackRuntimeState({
+    required bool isPlaying,
+    bool force = false,
+  }) async {
+    if (!force && _lastKnownIsPlaying == isPlaying) {
+      return;
+    }
+
+    _lastKnownIsPlaying = isPlaying;
+    await _publishPlaybackNotification(isPlaying: isPlaying);
+
+    if (isPlaying) {
+      await _backgroundService.startPlaybackService(
+        title: widget.media.title,
+        isVideo: !_isAudioOnly,
+      );
+    } else {
+      await _backgroundService.stopPlaybackService();
+    }
+  }
+
+  Future<void> _handlePlaybackNotificationAction(
+    PlaybackNotificationAction action,
+  ) async {
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) {
+      return;
+    }
+
+    switch (action) {
+      case PlaybackNotificationAction.togglePlayPause:
+        if (controller.value.isPlaying) {
+          await controller.pause();
+        } else {
+          await controller.play();
+        }
+        await _syncPlaybackRuntimeState(
+          isPlaying: controller.value.isPlaying,
+          force: true,
+        );
+        if (mounted) {
+          setState(() {});
+        }
+        break;
+      case PlaybackNotificationAction.stopPlayback:
+        await controller.pause();
+        await controller.seekTo(Duration.zero);
+        await _syncPlaybackRuntimeState(isPlaying: false, force: true);
+        if (mounted) {
+          setState(() {});
+        }
+        break;
+      case PlaybackNotificationAction.openApp:
+        break;
+    }
   }
 
   String _formatDuration(Duration value) {
@@ -165,11 +252,14 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
 
     if (controller.value.isPlaying) {
       await controller.pause();
-      await _processNotifications.clearPlaybackStatus();
     } else {
       await controller.play();
-      await _publishPlaybackNotification();
     }
+
+    await _syncPlaybackRuntimeState(
+      isPlaying: controller.value.isPlaying,
+      force: true,
+    );
 
     if (mounted) {
       setState(() {});

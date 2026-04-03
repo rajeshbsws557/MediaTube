@@ -17,13 +17,16 @@ class BackgroundDownloadService {
       FlutterLocalNotificationsPlugin();
   bool _isInitialized = false;
   bool _foregroundServiceRunning = false;
+  bool _downloadSessionRequested = false;
+  bool _playbackSessionRequested = false;
 
   /// Format bytes to human readable string
   String _formatBytes(int bytes) {
     if (bytes < 1024) return '$bytes B';
     if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024)
+    if (bytes < 1024 * 1024 * 1024) {
       return '${(bytes / 1024 / 1024).toStringAsFixed(1)} MB';
+    }
     return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} GB';
   }
 
@@ -94,26 +97,87 @@ class BackgroundDownloadService {
     _isInitialized = true;
   }
 
-  /// Start the foreground service - keeps app alive for downloads
-  Future<void> startService() async {
-    if (!_isInitialized) await initialize();
+  Future<void> _showOrUpdateForegroundService({
+    required String title,
+    required String text,
+  }) async {
+    if (!_isInitialized) {
+      await initialize();
+    }
 
     if (!_foregroundServiceRunning) {
       await FlutterForegroundTask.startService(
-        notificationTitle: 'MediaTube',
-        notificationText: 'Downloading in background...',
+        notificationTitle: title,
+        notificationText: text,
         notificationIcon: null,
       );
       _foregroundServiceRunning = true;
+      return;
     }
+
+    await FlutterForegroundTask.updateService(
+      notificationTitle: title,
+      notificationText: text,
+    );
   }
 
-  /// Stop the foreground service
-  Future<void> stopService() async {
+  Future<void> _syncForegroundServiceState() async {
+    if (!_isInitialized) {
+      await initialize();
+    }
+
+    if (_downloadSessionRequested) {
+      await _showOrUpdateForegroundService(
+        title: 'MediaTube',
+        text: 'Downloading in background...',
+      );
+      return;
+    }
+
+    if (_playbackSessionRequested) {
+      await _showOrUpdateForegroundService(
+        title: 'MediaTube Playback',
+        text: 'Playing in background...',
+      );
+      return;
+    }
+
     if (_foregroundServiceRunning) {
       await FlutterForegroundTask.stopService();
       _foregroundServiceRunning = false;
     }
+  }
+
+  /// Start the foreground service - keeps app alive for downloads.
+  Future<void> startService() async {
+    _downloadSessionRequested = true;
+    await _syncForegroundServiceState();
+  }
+
+  /// Stop the foreground service for downloads.
+  /// Playback can keep the service alive if active.
+  Future<void> stopService() async {
+    _downloadSessionRequested = false;
+    await _syncForegroundServiceState();
+  }
+
+  /// Start foreground service protection for media playback.
+  Future<void> startPlaybackService({
+    required String title,
+    required bool isVideo,
+  }) async {
+    _playbackSessionRequested = true;
+    await _showOrUpdateForegroundService(
+      title: isVideo ? 'Video playback active' : 'Background music active',
+      text: title,
+    );
+  }
+
+  /// Stop foreground service protection for playback.
+  /// Downloads can keep the service alive if active.
+  Future<void> stopPlaybackService() async {
+    _playbackSessionRequested = false;
+    await _syncForegroundServiceState();
   }
 
   /// Update download progress notification with detailed info including speed and ETA

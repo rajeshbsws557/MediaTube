@@ -12,6 +12,7 @@
     <!-- Foreground service for downloads -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
     <!-- App update/install permissions -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     
@@ -51,7 +52,7 @@
         <!-- Foreground service for background downloads -->
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
-            android:foregroundServiceType="dataSync"
+            android:foregroundServiceType="dataSync|mediaPlayback"
             android:exported="false"/>
             
         <!-- Don't delete the meta-data below.

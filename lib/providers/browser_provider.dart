@@ -290,7 +290,11 @@ class BrowserProvider extends ChangeNotifier {
     });
   }
 
-  bool _shouldInspectResource(String url, {String? contentType}) {
+  bool _shouldInspectResource(
+    String url, {
+    String? contentType,
+    int? contentLength,
+  }) {
     final lowerUrl = url.toLowerCase();
     if (!lowerUrl.startsWith('http://') && !lowerUrl.startsWith('https://')) {
       return false;
@@ -301,6 +305,17 @@ class BrowserProvider extends ChangeNotifier {
         lowerType.contains('audio/') ||
         lowerType.contains('mpegurl') ||
         lowerType.contains('dash+xml')) {
+      return true;
+    }
+
+    final hasUsableLength = contentLength != null && contentLength > 0;
+    if (hasUsableLength &&
+        (lowerUrl.contains('fbcdn.net') ||
+            lowerUrl.contains('fbsbx.com') ||
+            lowerUrl.contains('cdninstagram.com') ||
+            lowerUrl.contains('video.twimg.com') ||
+            lowerUrl.contains('twimg.com') ||
+            lowerUrl.contains('tiktokcdn'))) {
       return true;
     }
 
@@ -769,10 +784,31 @@ class BrowserProvider extends ChangeNotifier {
           (current.fileSize == null || current.fileSize! <= 0) &&
           (media.fileSize != null && media.fileSize! > 0);
 
-      if (hasBetterScore || canFillMissingSize) {
-        _detectedMedia[existingIndex] = media;
+      if (canFillMissingSize && !hasBetterScore) {
+        _detectedMedia[existingIndex] = current.copyWith(fileSize: media.fileSize);
         return true;
       }
+
+      if (hasBetterScore) {
+        _detectedMedia[existingIndex] = media.copyWith(
+          title: media.title.isNotEmpty ? media.title : current.title,
+          source: media.source == MediaSource.generic
+              ? current.source
+              : media.source,
+          thumbnailUrl: media.thumbnailUrl ?? current.thumbnailUrl,
+          fileSize: media.fileSize ?? current.fileSize,
+          quality: media.quality ?? current.quality,
+          format: media.format ?? current.format,
+          audioUrl: media.audioUrl ?? current.audioUrl,
+          isDash: media.isDash || current.isDash,
+          videoId: media.videoId ?? current.videoId,
+          streamIndex: media.streamIndex ?? current.streamIndex,
+          backendQuality: media.backendQuality ?? current.backendQuality,
+          useBackend: media.useBackend || current.useBackend,
+        );
+        return true;
+      }
+
       return false;
     }
 
@@ -801,7 +837,11 @@ class BrowserProvider extends ChangeNotifier {
   }
 
   /// Called when a resource is loaded - used for media detection
-  void onResourceLoaded(String url, {String? contentType}) {
+  void onResourceLoaded(
+    String url, {
+    String? contentType,
+    int? contentLength,
+  }) {
     if (!_isSocialVideoPage && !_isFetchingGeneric) {
       return;
     }
@@ -814,11 +854,21 @@ class BrowserProvider extends ChangeNotifier {
       return;
     }
 
-    if (!_shouldInspectResource(url, contentType: contentType)) {
+    if (!_shouldInspectResource(
+      url,
+      contentType: contentType,
+      contentLength: contentLength,
+    )) {
       return;
     }
 
-    if (!_shouldProcessResourceUrl(url)) {
+    if (contentLength != null && contentLength > 0) {
+      _resolvedSizeByUrl[url] = contentLength;
+      _applyResolvedSize(url, contentLength);
+    }
+
+    final shouldProcess = _shouldProcessResourceUrl(url);
+    if (!shouldProcess && !(contentLength != null && contentLength > 0)) {
       return;
     }
 
@@ -826,6 +876,7 @@ class BrowserProvider extends ChangeNotifier {
       url,
       pageTitle: pageTitle,
       contentType: contentType,
+      contentLength: contentLength,
     );
     if (media != null) {
       final changed = _upsertDetectedMedia(media);

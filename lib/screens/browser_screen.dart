@@ -552,7 +552,72 @@ class _BrowserScreenState extends State<BrowserScreen>
               context.read<BrowserProvider>().setPageTitle(title ?? '');
             },
             onLoadResource: (controller, resource) {
-              // No-op: shouldInterceptRequest already feeds the sniffer.
+              final provider = context.read<BrowserProvider>();
+              if (!provider.shouldObserveNetworkMedia) {
+                return;
+              }
+
+              final dynamic raw = resource;
+              final url = raw.url?.toString() ?? '';
+              if (url.isEmpty) {
+                return;
+              }
+
+              String? contentTypeHint;
+              int? contentLengthHint;
+
+              try {
+                final dynamic typeValue = raw.contentType;
+                if (typeValue is String && typeValue.isNotEmpty) {
+                  contentTypeHint = typeValue;
+                }
+              } catch (_) {}
+
+              try {
+                final dynamic lengthValue = raw.contentLength;
+                if (lengthValue is int && lengthValue > 0) {
+                  contentLengthHint = lengthValue;
+                } else if (lengthValue is String) {
+                  final parsed = int.tryParse(lengthValue);
+                  if (parsed != null && parsed > 0) {
+                    contentLengthHint = parsed;
+                  }
+                }
+              } catch (_) {}
+
+              try {
+                final dynamic responseHeaders = raw.responseHeaders;
+                if (responseHeaders is Map) {
+                  String? lookupHeader(String key) {
+                    final lowerKey = key.toLowerCase();
+                    for (final entry in responseHeaders.entries) {
+                      final headerKey = entry.key.toString().toLowerCase();
+                      if (headerKey == lowerKey) {
+                        return entry.value?.toString();
+                      }
+                    }
+                    return null;
+                  }
+
+                  contentTypeHint ??= lookupHeader('content-type');
+
+                  final lengthFromHeader = lookupHeader('content-length');
+                  if (contentLengthHint == null &&
+                      lengthFromHeader != null &&
+                      lengthFromHeader.isNotEmpty) {
+                    final parsed = int.tryParse(lengthFromHeader);
+                    if (parsed != null && parsed > 0) {
+                      contentLengthHint = parsed;
+                    }
+                  }
+                }
+              } catch (_) {}
+
+              provider.onResourceLoaded(
+                url,
+                contentType: contentTypeHint,
+                contentLength: contentLengthHint,
+              );
             },
             shouldInterceptRequest: (controller, request) async {
               final provider = context.read<BrowserProvider>();

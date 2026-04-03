@@ -58,8 +58,13 @@ class MediaSnifferService {
     String url, {
     String? pageTitle,
     String? contentType,
+    int? contentLength,
   }) {
     final lowerUrl = url.toLowerCase();
+    final resolvedSize = _resolveKnownFileSize(
+      contentLength: contentLength,
+      url: url,
+    );
 
     if (lowerUrl.startsWith('blob:') ||
         lowerUrl.startsWith('data:') ||
@@ -81,7 +86,7 @@ class MediaSnifferService {
           url: url,
           title: pageTitle ?? _extractFileName(url) ?? 'Video',
           type: MediaType.video,
-          fileSize: _extractFileSizeHint(url),
+          fileSize: resolvedSize,
           format: ext.replaceFirst('.', ''),
         );
       }
@@ -94,7 +99,7 @@ class MediaSnifferService {
           url: url,
           title: pageTitle ?? _extractFileName(url) ?? 'Audio',
           type: MediaType.audio,
-          fileSize: _extractFileSizeHint(url),
+          fileSize: resolvedSize,
           format: ext.replaceFirst('.', ''),
         );
       }
@@ -107,7 +112,7 @@ class MediaSnifferService {
           url: url,
           title: pageTitle ?? 'Live Stream',
           type: MediaType.stream,
-          fileSize: _extractFileSizeHint(url),
+          fileSize: resolvedSize,
           format: ext.replaceFirst('.', ''),
         );
       }
@@ -122,7 +127,7 @@ class MediaSnifferService {
           url: url,
           title: pageTitle ?? (streamLike ? 'Live Stream' : 'Video'),
           type: streamLike ? MediaType.stream : MediaType.video,
-          fileSize: _extractFileSizeHint(url),
+          fileSize: resolvedSize,
           format: streamLike ? 'm3u8' : _inferFormatFromUrl(lowerUrl),
         );
       }
@@ -133,7 +138,7 @@ class MediaSnifferService {
         url: url,
         title: pageTitle ?? 'Video',
         type: MediaType.video,
-        fileSize: _extractFileSizeHint(url),
+        fileSize: resolvedSize,
         format: _inferFormatFromUrl(lowerUrl),
       );
     }
@@ -145,11 +150,19 @@ class MediaSnifferService {
         url: url,
         title: pageTitle ?? 'Video',
         type: MediaType.video,
-        fileSize: _extractFileSizeHint(url),
+        fileSize: resolvedSize,
       );
     }
 
     return null;
+  }
+
+  int? _resolveKnownFileSize({required String url, int? contentLength}) {
+    if (contentLength != null && contentLength > 0) {
+      return contentLength;
+    }
+
+    return _extractFileSizeHint(url);
   }
 
   bool _looksLikePlatformVideoUrl(String lowerUrl) {

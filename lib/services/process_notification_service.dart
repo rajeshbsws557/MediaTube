@@ -1,5 +1,11 @@
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+enum PlaybackNotificationAction {
+  togglePlayPause,
+  stopPlayback,
+  openApp,
+}
+
 /// Lightweight app-process notifications for media scan and playback state.
 class ProcessNotificationService {
   static final ProcessNotificationService _instance =
@@ -19,6 +25,16 @@ class ProcessNotificationService {
   bool _initialized = false;
   DateTime? _lastScanStartedAt;
   DateTime? _lastScanResultAt;
+  DateTime? _lastPlaybackStatusAt;
+  String? _lastPlaybackTitle;
+  bool? _lastPlaybackIsPlaying;
+  void Function(PlaybackNotificationAction action)? _playbackActionHandler;
+
+  void setPlaybackActionHandler(
+    void Function(PlaybackNotificationAction action)? handler,
+  ) {
+    _playbackActionHandler = handler;
+  }
 
   Future<void> _ensureInitialized() async {
     if (_initialized) {
@@ -29,7 +45,26 @@ class ProcessNotificationService {
       android: AndroidInitializationSettings('@mipmap/ic_launcher'),
     );
 
-    await _notifications.initialize(initSettings);
+    await _notifications.initialize(
+      initSettings,
+      onDidReceiveNotificationResponse: (response) {
+        final actionId = response.actionId;
+
+        if (actionId == 'toggle_playback') {
+          _playbackActionHandler?.call(
+            PlaybackNotificationAction.togglePlayPause,
+          );
+          return;
+        }
+
+        if (actionId == 'stop_playback') {
+          _playbackActionHandler?.call(PlaybackNotificationAction.stopPlayback);
+          return;
+        }
+
+        _playbackActionHandler?.call(PlaybackNotificationAction.openApp);
+      },
+    );
 
     const channel = AndroidNotificationChannel(
       _channelId,
@@ -129,8 +164,22 @@ class ProcessNotificationService {
   Future<void> showPlaybackStatus({
     required String title,
     required bool isVideo,
+    required bool isPlaying,
   }) async {
     await _ensureInitialized();
+
+    final now = DateTime.now();
+    final changedState =
+        _lastPlaybackTitle != title || _lastPlaybackIsPlaying != isPlaying;
+    if (!changedState &&
+        _lastPlaybackStatusAt != null &&
+        now.difference(_lastPlaybackStatusAt!) < const Duration(seconds: 1)) {
+      return;
+    }
+
+    _lastPlaybackStatusAt = now;
+    _lastPlaybackTitle = title;
+    _lastPlaybackIsPlaying = isPlaying;
 
     final details = NotificationDetails(
       android: AndroidNotificationDetails(
@@ -139,15 +188,28 @@ class ProcessNotificationService {
         channelDescription: 'Media scan and playback process notifications',
         importance: Importance.high,
         priority: Priority.high,
-        ongoing: true,
+        ongoing: isPlaying,
         onlyAlertOnce: true,
         subText: isVideo ? 'Video background mode' : 'Background music mode',
+        actions: <AndroidNotificationAction>[
+          AndroidNotificationAction(
+            'toggle_playback',
+            isPlaying ? 'Pause' : 'Play',
+            showsUserInterface: false,
+          ),
+          AndroidNotificationAction(
+            'stop_playback',
+            'Stop',
+            showsUserInterface: false,
+            cancelNotification: true,
+          ),
+        ],
       ),
     );
 
     await _notifications.show(
       _playbackNotificationId,
-      'Background playback active',
+      isPlaying ? 'Background playback active' : 'Playback paused',
       title,
       details,
     );
@@ -155,6 +217,9 @@ class ProcessNotificationService {
 
   Future<void> clearPlaybackStatus() async {
     await _ensureInitialized();
+    _lastPlaybackStatusAt = null;
+    _lastPlaybackTitle = null;
+    _lastPlaybackIsPlaying = null;
     await _notifications.cancel(_playbackNotificationId);
   }
 }

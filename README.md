@@ -24,9 +24,13 @@ A Flutter Android app with browser and media downloading capabilities. Download 
 - 🌐 **Built-in Browser** - Navigate to any website using embedded WebView
 - 🎬 **YouTube Support** - Download YouTube videos in various qualities (up to 1080p+)
 - 📥 **Media Detection** - Automatically detects downloadable media from websites
+- 🚀 **Faster Social Extraction** - Improved Facebook/Instagram/TikTok/X share normalization and media detection
+- 📏 **Better Size Accuracy** - Uses explicit size hints and concurrent probe workers for more reliable file size estimates
 - 📊 **Download Manager** - Track progress, pause/resume downloads
+- 🔔 **Process Notifications** - Download, scan, and playback state notifications
 - 🔄 **Auto-Update** - Check for app updates automatically
 - 🎵 **Audio Extraction** - Download audio-only streams from videos
+- 🎧 **YouTube Background Playback** - Play YouTube audio/video streams in background mode with screen-off continuity
 
 ## Screenshots
 
@@ -43,13 +47,13 @@ A Flutter Android app with browser and media downloading capabilities. Download 
 ## Installation
 
 ### Option 1: Download APK
-Download the latest APK from [Releases](https://github.com/YOUR_USERNAME/MediaTube/releases).
+Download the latest APK from [Releases](https://github.com/rajeshbsws557/MediaTube/releases).
 
 ### Option 2: Build from Source
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/YOUR_USERNAME/MediaTube.git
+   git clone https://github.com/rajeshbsws557/MediaTube.git
    cd MediaTube
    ```
 
@@ -77,7 +81,7 @@ Download the latest APK from [Releases](https://github.com/YOUR_USERNAME/MediaTu
 
 ## Backend Server
 
-MediaTube requires a Java backend server for YouTube video extraction. See the [MediaTube-Server](https://github.com/YOUR_USERNAME/MediaTube-Server) repository for setup instructions.
+MediaTube uses on-device extraction by default and can optionally fall back to a backend server.
 
 ## Configuration
 
@@ -126,6 +130,24 @@ flutter build apk --release
 ```
 
 The APK will be at `build/app/outputs/flutter-apk/app-release.apk`
+
+## GitHub Split-ABI Release
+
+Tag pushes (`v*`) trigger `.github/workflows/release.yml` and publish split APK assets:
+
+- `app-arm64-v8a-release.apk`
+- `app-armeabi-v7a-release.apk`
+- `app-universal-release.apk` (fallback)
+
+Release flow:
+
+```bash
+git add -A
+git commit -m "release: vX.Y.Z"
+git push origin master
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
 
 ## Contributing
 

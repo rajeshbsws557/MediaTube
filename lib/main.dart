@@ -356,6 +356,33 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
           add('https://m.facebook.com/watch/?v=$watchId');
         }
       }
+
+      if (host.contains('instagram.com') || host == 'instagr.am') {
+        add(uri.replace(scheme: 'https', host: 'www.instagram.com').toString());
+        add(uri.replace(scheme: 'https', host: 'm.instagram.com').toString());
+
+        final segments = uri.pathSegments;
+        final reelIndex = segments.indexOf('reel');
+        if (reelIndex != -1 && reelIndex + 1 < segments.length) {
+          add('https://www.instagram.com/reel/${segments[reelIndex + 1]}/');
+        }
+      }
+
+      if (host.contains('tiktok.com')) {
+        add(uri.replace(scheme: 'https', host: 'www.tiktok.com').toString());
+        add(uri.replace(scheme: 'https', host: 'm.tiktok.com').toString());
+      }
+
+      if (host.contains('x.com') || host.contains('twitter.com')) {
+        add(uri.replace(scheme: 'https', host: 'x.com').toString());
+
+        final statusMatch = RegExp(r'^/([^/]+)/status/(\d+)').firstMatch(uri.path);
+        if (statusMatch != null) {
+          add(
+            'https://x.com/${statusMatch.group(1)}/status/${statusMatch.group(2)}',
+          );
+        }
+      }
     }
 
     return candidates;

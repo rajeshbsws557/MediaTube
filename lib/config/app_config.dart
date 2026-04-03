@@ -1,8 +1,8 @@
-/// App Configuration
-///
-/// This file contains configurable values for the MediaTube app.
-/// Copy this file to `app_config.local.dart` and modify for local development.
-/// The .local.dart file is gitignored and won't be committed.
+// App Configuration
+//
+// This file contains configurable values for the MediaTube app.
+// Copy this file to `app_config.local.dart` and modify for local development.
+// The .local.dart file is gitignored and won't be committed.
 
 class AppConfig {
   /// Backend server URL (OPTIONAL - used as fallback only)
@@ -13,14 +13,14 @@ class AppConfig {
   /// For Android emulator: 'http://10.0.2.2:5000'
   /// For physical device on same network: 'http://YOUR_LOCAL_IP:5000'
   /// For production: 'https://your-server.com'
-    /// Backend server URL (Legacy/Fallback)
-    ///
-    /// Keep this HTTPS by default. Override at build time for local debugging:
-    /// flutter run --dart-define=BACKEND_BASE_URL=http://10.0.2.2:5000
-    static const String backendBaseUrl = String.fromEnvironment(
-        'BACKEND_BASE_URL',
-        defaultValue: 'https://your-server.com',
-    );
+  /// Backend server URL (Legacy/Fallback)
+  ///
+  /// Keep this HTTPS by default. Override at build time for local debugging:
+  /// flutter run --dart-define=BACKEND_BASE_URL=http://10.0.2.2:5000
+  static const String backendBaseUrl = String.fromEnvironment(
+    'BACKEND_BASE_URL',
+    defaultValue: 'https://your-server.com',
+  );
 
   /// GitHub repository owner
   static const String githubRepoOwner = 'rajeshbsws557';
@@ -33,7 +33,7 @@ class AppConfig {
       'https://github.com/$githubRepoOwner/$githubRepoName/releases';
 
   /// Current app version (should match pubspec.yaml)
-  static const String appVersion = '1.0.0';
+  static const String appVersion = '1.0.2';
 
   // ============================================================
   // SECURITY CONFIGURATION

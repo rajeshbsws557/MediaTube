@@ -525,7 +525,9 @@ class _BrowserScreenState extends State<BrowserScreen>
                     );
                   }
 
-                  if (provider.isSocialVideoPage && !provider.hasDetectedMedia) {
+                  if (provider.isSocialVideoPage &&
+                      !provider.hasDetectedMedia &&
+                      !provider.isFetchingMedia) {
                     provider.refreshCurrentPlatformMedia(
                       forceRefresh: false,
                       runHeadlessExtractor: true,
@@ -565,6 +567,14 @@ class _BrowserScreenState extends State<BrowserScreen>
               final acceptHeader = request.headers?['Accept'] ?? request.headers?['accept'];
               if (acceptHeader != null && acceptHeader.isNotEmpty) {
                 contentTypeHint = acceptHeader;
+              }
+
+              final fetchDest = request.headers?['Sec-Fetch-Dest'] ??
+                  request.headers?['sec-fetch-dest'];
+              if (fetchDest == 'video') {
+                contentTypeHint = 'video/mp4';
+              } else if (fetchDest == 'audio') {
+                contentTypeHint = 'audio/mpeg';
               }
 
               provider.onResourceLoaded(url, contentType: contentTypeHint);

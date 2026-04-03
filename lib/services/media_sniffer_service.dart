@@ -239,15 +239,11 @@ class MediaSnifferService {
           parseIntParam('content_length') ??
           parseIntParam('clen') ??
           parseIntParam('filesize') ??
-          parseIntParam('size');
+          parseIntParam('size') ??
+          parseIntParam('total_size') ??
+          parseIntParam('totlen') ??
+          parseIntParam('x-amz-meta-content-length');
       if (explicitSize != null && explicitSize > 0) return explicitSize;
-
-      final start = parseIntParam('bytestart');
-      final end = parseIntParam('byteend');
-      if (start != null && end != null && end >= start) {
-        final span = (end - start) + 1;
-        if (span > 0) return span;
-      }
     } catch (_) {}
 
     return null;

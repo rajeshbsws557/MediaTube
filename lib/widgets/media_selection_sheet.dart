@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../models/models.dart';
 import '../providers/providers.dart';
+import '../screens/youtube_playback_screen.dart';
 
 class MediaSelectionSheet extends StatefulWidget {
   final List<DetectedMedia> media;
@@ -343,6 +344,10 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
         .where((m) => m.type == _selectedType)
         .toList();
 
+    final backgroundPlayable = widget.isYouTube
+      ? _pickBackgroundPlayableMedia()
+      : null;
+
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Column(
@@ -372,7 +377,88 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
               ),
             ),
           ],
+          if (backgroundPlayable != null) ...[
+            const SizedBox(height: 8),
+            FilledButton.tonalIcon(
+              onPressed: () => _startBackgroundPlayback(
+                context,
+                backgroundPlayable,
+              ),
+              icon: const Icon(Icons.headphones),
+              label: const Text('Play in Background / Screen Off'),
+              style: FilledButton.styleFrom(
+                minimumSize: const Size(double.infinity, 44),
+              ),
+            ),
+          ],
         ],
+      ),
+    );
+  }
+
+  DetectedMedia? _pickBackgroundPlayableMedia() {
+    final fromYoutube = widget.media
+        .where((m) => m.source == MediaSource.youtube)
+        .toList();
+    if (fromYoutube.isEmpty) {
+      return null;
+    }
+
+    final audio = fromYoutube.where((m) => m.type == MediaType.audio).toList();
+    if (audio.isNotEmpty) {
+      audio.sort((a, b) {
+        final scoreA = _extractBitrateScore(a.quality ?? '');
+        final scoreB = _extractBitrateScore(b.quality ?? '');
+        return scoreB.compareTo(scoreA);
+      });
+      return audio.first;
+    }
+
+    final nonDashVideos = fromYoutube
+        .where((m) => m.type == MediaType.video && !m.isDash)
+        .toList();
+    if (nonDashVideos.isNotEmpty) {
+      nonDashVideos.sort((a, b) {
+        final scoreA = _extractResolutionScore(a.quality ?? '');
+        final scoreB = _extractResolutionScore(b.quality ?? '');
+        return scoreB.compareTo(scoreA);
+      });
+      return nonDashVideos.first;
+    }
+
+    return null;
+  }
+
+  int _extractBitrateScore(String quality) {
+    final match = RegExp(r'(\d{2,4})\s*kbps', caseSensitive: false)
+        .firstMatch(quality);
+    if (match == null) {
+      return 0;
+    }
+    return int.tryParse(match.group(1) ?? '0') ?? 0;
+  }
+
+  int _extractResolutionScore(String quality) {
+    final match = RegExp(r'(\d{3,4})p', caseSensitive: false)
+        .firstMatch(quality);
+    if (match == null) {
+      return 0;
+    }
+    return int.tryParse(match.group(1) ?? '0') ?? 0;
+  }
+
+  Future<void> _startBackgroundPlayback(
+    BuildContext context,
+    DetectedMedia media,
+  ) async {
+    final navigator = Navigator.of(context, rootNavigator: true);
+    Navigator.pop(context);
+
+    await Future.delayed(const Duration(milliseconds: 120));
+
+    await navigator.push(
+      MaterialPageRoute(
+        builder: (_) => YoutubePlaybackScreen(media: media),
       ),
     );
   }

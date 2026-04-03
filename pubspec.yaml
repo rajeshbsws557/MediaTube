@@ -1,13 +1,13 @@
 # Developer - Rajesh Biswas
 # Website - https://rajeshbiswas.dev
 # GitHub - https://github.com/rajeshbsws557
-# Version - 1.0.0
+# Version - 1.0.2
 # License - MIT
 
 name: media_tube
 description: "A media browser with video/audio detection and downloading capabilities"
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.2+2
 
 environment:
   sdk: ^3.10.0
@@ -58,6 +58,7 @@ dependencies:
   receive_sharing_intent: ^1.8.1
   share_plus: ^12.0.1
   dynamic_color: ^1.8.1
+  video_player: ^2.10.0
 
 dev_dependencies:
   flutter_test:

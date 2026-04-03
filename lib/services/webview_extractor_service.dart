@@ -8,14 +8,19 @@ import 'media_sniffer_service.dart';
 /// This provides a skeleton for a headless InAppWebView to navigate to a URL and intercept
 /// network traffic looking for .mp4 or .m3u8 CDN links dynamically.
 class WebViewExtractorService {
-  HeadlessInAppWebView? _headlessWebView;
   final MediaSnifferService _sniffer = MediaSnifferService();
-  static const Duration _overallTimeout = Duration(seconds: 10);
+  final Map<String, _CachedExtractionResult> _cache =
+      <String, _CachedExtractionResult>{};
+  final Map<String, Future<List<DetectedMedia>>> _inFlight =
+      <String, Future<List<DetectedMedia>>>{};
+
+  static const Duration _overallTimeout = Duration(seconds: 8);
+  static const Duration _cacheTtl = Duration(minutes: 3);
   static const List<Duration> _domScanDelays = [
-    Duration(milliseconds: 200),
-    Duration(milliseconds: 450),
-    Duration(milliseconds: 700),
-    Duration(milliseconds: 1100),
+    Duration(milliseconds: 120),
+    Duration(milliseconds: 220),
+    Duration(milliseconds: 350),
+    Duration(milliseconds: 560),
   ];
 
   void _addMediaIfNew(List<DetectedMedia> mediaList, DetectedMedia media) {
@@ -78,16 +83,70 @@ class WebViewExtractorService {
     }
   }
 
+  String _normalizeKey(String rawUrl) {
+    final uri = Uri.tryParse(rawUrl);
+    if (uri == null) {
+      return rawUrl;
+    }
+    return uri.replace(fragment: null).toString();
+  }
+
+  List<DetectedMedia>? _getCached(String key) {
+    final cached = _cache[key];
+    if (cached == null) {
+      return null;
+    }
+
+    if (DateTime.now().difference(cached.timestamp) > _cacheTtl) {
+      _cache.remove(key);
+      return null;
+    }
+
+    return List<DetectedMedia>.from(cached.media);
+  }
+
   /// Extract media from a generic URL using a hidden browser
   Future<List<DetectedMedia>> extractMedia(String url) async {
+    final key = _normalizeKey(url);
+
+    final cached = _getCached(key);
+    if (cached != null) {
+      return cached;
+    }
+
+    final existingInFlight = _inFlight[key];
+    if (existingInFlight != null) {
+      return existingInFlight;
+    }
+
+    final extractionFuture = _extractMediaInternal(url, cacheKey: key);
+    _inFlight[key] = extractionFuture;
+
+    try {
+      return await extractionFuture;
+    } finally {
+      _inFlight.remove(key);
+    }
+  }
+
+  Future<List<DetectedMedia>> _extractMediaInternal(
+    String url, {
+    required String cacheKey,
+  }) async {
     final completer = Completer<List<DetectedMedia>>();
     final List<DetectedMedia> mediaList = [];
     final startedAt = DateTime.now();
+    HeadlessInAppWebView? headlessWebView;
 
     void completeExtraction({bool force = false}) {
       if (completer.isCompleted) return;
       if (!force && mediaList.isEmpty) return;
-      completer.complete(List<DetectedMedia>.from(mediaList));
+      final output = List<DetectedMedia>.from(mediaList);
+      _cache[cacheKey] = _CachedExtractionResult(
+        media: output,
+        timestamp: DateTime.now(),
+      );
+      completer.complete(output);
     }
 
     void maybeCompleteEarly() {
@@ -101,7 +160,7 @@ class WebViewExtractorService {
       }
     }
 
-    _headlessWebView = HeadlessInAppWebView(
+    headlessWebView = HeadlessInAppWebView(
       initialUrlRequest: URLRequest(url: WebUri(url)),
       initialSettings: InAppWebViewSettings(
         userAgent: 'Mozilla/5.0 (Linux; Android 10) Mobile Safari/537.36',
@@ -140,7 +199,7 @@ class WebViewExtractorService {
     );
 
     try {
-      await _headlessWebView?.run();
+      await headlessWebView.run();
     } catch (e) {
       debugPrint('Headless extractor run failed: $e');
       completeExtraction(force: true);
@@ -153,7 +212,17 @@ class WebViewExtractorService {
 
     final result = await completer.future;
     timeoutTimer.cancel();
-    _headlessWebView?.dispose();
+    headlessWebView.dispose();
     return result;
   }
+}
+
+class _CachedExtractionResult {
+  final List<DetectedMedia> media;
+  final DateTime timestamp;
+
+  const _CachedExtractionResult({
+    required this.media,
+    required this.timestamp,
+  });
 }

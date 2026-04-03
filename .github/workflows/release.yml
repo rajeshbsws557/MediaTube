@@ -36,23 +36,29 @@ jobs:
       - name: Decode Keystore
         run: |
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release-key.jks
+
+      - name: Ensure Gradle wrapper executable
+        run: chmod +x android/gradlew
       
       - name: Build Release APKs (Split Per ABI)
+        working-directory: android
         env:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           STORE_FILE: release-key.jks
-        run: flutter build apk --release --split-per-abi --no-tree-shake-icons
+        run: ./gradlew --no-daemon app:assembleRelease
 
       - name: List generated APK files
-        run: ls -lah build/app/outputs/flutter-apk/
+        run: |
+          ls -lah android/app/build/outputs/apk/release/
+          ls -lah build/app/outputs/flutter-apk/ || true
       
       - name: Upload Split APK Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: app-split-release
-          path: build/app/outputs/flutter-apk/app-*-release.apk
+          path: android/app/build/outputs/apk/release/app-*-release.apk
           if-no-files-found: error
       
       - name: Create GitHub Release
@@ -60,7 +66,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            build/app/outputs/flutter-apk/app-*-release.apk
+            android/app/build/outputs/apk/release/app-*-release.apk
           generate_release_notes: true
           draft: false
           prerelease: false

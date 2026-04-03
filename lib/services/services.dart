@@ -10,3 +10,4 @@ export 'update_manager.dart';
 export 'security_service.dart';
 export 'settings_service.dart';
 export 'share_url_service.dart';
+export 'process_notification_service.dart';

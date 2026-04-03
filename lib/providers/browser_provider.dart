@@ -12,6 +12,8 @@ class BrowserProvider extends ChangeNotifier {
   final MediaSnifferService _snifferService = MediaSnifferService();
   final YouTubeService _youtubeService = YouTubeService();
   final WebViewExtractorService _webviewExtractor = WebViewExtractorService();
+  final ProcessNotificationService _processNotifications =
+      ProcessNotificationService();
 
   final List<BrowserTab> _tabs = [BrowserTab(url: 'https://youtube.com')];
   int _activeTabIndex = 0;
@@ -38,7 +40,7 @@ class BrowserProvider extends ChangeNotifier {
   // PERSISTENT cache - survives sheet open/close, holds multiple videos
   static final Map<String, List<DetectedMedia>> _streamCache = {};
   static const int _maxCacheSize = 50; // Increased cache for more videos
-  static const int _maxDetectedMediaItems = 24;
+  static const int _maxDetectedMediaItems = 12;
   static const Set<String> _volatileSegmentParams = {
     'bytestart',
     'byteend',
@@ -64,7 +66,9 @@ class BrowserProvider extends ChangeNotifier {
   final Queue<String> _sizeProbeQueue = Queue<String>();
   final Set<String> _sizeProbeInFlight = <String>{};
   final Map<String, int> _resolvedSizeByUrl = <String, int>{};
-  bool _sizeProbePumpRunning = false;
+  int _sizeProbeActiveCount = 0;
+  static const int _maxConcurrentSizeProbes = 3;
+  static const int _maxSizeProbeQueueLength = 20;
 
   final Map<String, int> _recentResourceHits = <String, int>{};
   int _resourceHitInsertions = 0;
@@ -120,7 +124,7 @@ class BrowserProvider extends ChangeNotifier {
   bool get isFetchingGeneric => _isFetchingGeneric;
   bool get isFetchingMedia => _isFetchingYouTube || _isFetchingGeneric;
   bool get shouldObserveNetworkMedia =>
-      _isSocialVideoPage || _isFetchingGeneric || _detectedMedia.isNotEmpty;
+      _isSocialVideoPage || _isFetchingGeneric;
   String? get fetchError => _fetchError;
   bool get hasFetchError => _fetchError != null;
 
@@ -188,12 +192,14 @@ class BrowserProvider extends ChangeNotifier {
 
     if (!_isYouTubePage && _isSocialVideoPage) {
       _genericFetchDebounceTimer?.cancel();
-      _genericFetchDebounceTimer = Timer(const Duration(milliseconds: 900), () {
-        // Let the visible WebView capture resources first; headless fallback can run later.
-        refreshCurrentPlatformMedia(
-          forceRefresh: false,
-          runHeadlessExtractor: false,
-        );
+      _genericFetchDebounceTimer = Timer(const Duration(milliseconds: 650), () {
+        // Start headless fallback quickly if interception did not yield candidates.
+        if (_detectedMedia.isEmpty) {
+          refreshCurrentPlatformMedia(
+            forceRefresh: false,
+            runHeadlessExtractor: true,
+          );
+        }
       });
     }
 
@@ -388,14 +394,11 @@ class BrowserProvider extends ChangeNotifier {
           parse('content_length') ??
           parse('clen') ??
           parse('filesize') ??
-          parse('size');
+          parse('size') ??
+          parse('total_size') ??
+          parse('totlen') ??
+          parse('x-amz-meta-content-length');
       if (explicit != null && explicit > 0) return explicit;
-
-      final start = parse('bytestart');
-      final end = parse('byteend');
-      if (start != null && end != null && end >= start) {
-        return (end - start) + 1;
-      }
     } catch (_) {}
 
     return null;
@@ -575,40 +578,41 @@ class BrowserProvider extends ChangeNotifier {
       return;
     }
 
+    if (_sizeProbeQueue.length >= _maxSizeProbeQueueLength) {
+      return;
+    }
+
     _sizeProbeQueue.add(url);
     _pumpSizeProbeQueue();
   }
 
   void _pumpSizeProbeQueue() {
-    if (_sizeProbePumpRunning) return;
-    _sizeProbePumpRunning = true;
-
-    unawaited(() async {
-      try {
-        while (_sizeProbeQueue.isNotEmpty) {
-          final url = _sizeProbeQueue.removeFirst();
-          if (_resolvedSizeByUrl.containsKey(url) || _sizeProbeInFlight.contains(url)) {
-            continue;
-          }
-
-          _sizeProbeInFlight.add(url);
-          try {
-            final size = await _probeMediaSize(url);
-            if (size != null && size > 0) {
-              _resolvedSizeByUrl[url] = size;
-              _applyResolvedSize(url, size);
-            }
-          } finally {
-            _sizeProbeInFlight.remove(url);
-          }
-        }
-      } finally {
-        _sizeProbePumpRunning = false;
-        if (_sizeProbeQueue.isNotEmpty) {
-          _pumpSizeProbeQueue();
-        }
+    while (_sizeProbeActiveCount < _maxConcurrentSizeProbes &&
+        _sizeProbeQueue.isNotEmpty) {
+      final url = _sizeProbeQueue.removeFirst();
+      if (_resolvedSizeByUrl.containsKey(url) || _sizeProbeInFlight.contains(url)) {
+        continue;
       }
-    }());
+
+      _sizeProbeInFlight.add(url);
+      _sizeProbeActiveCount++;
+
+      unawaited(() async {
+        try {
+          final size = await _probeMediaSize(url);
+          if (size != null && size > 0) {
+            _resolvedSizeByUrl[url] = size;
+            _applyResolvedSize(url, size);
+          }
+        } finally {
+          _sizeProbeInFlight.remove(url);
+          _sizeProbeActiveCount--;
+          if (_sizeProbeQueue.isNotEmpty) {
+            _pumpSizeProbeQueue();
+          }
+        }
+      }());
+    }
   }
 
   DetectedMedia _normalizeDetectedMedia(DetectedMedia media) {
@@ -705,14 +709,45 @@ class BrowserProvider extends ChangeNotifier {
 
     final host = uri.host.toLowerCase();
     final isFacebook = host.contains('facebook.com') || host.contains('fb.watch');
-    if (!isFacebook) return candidates;
+    final isInstagram = host.contains('instagram.com') || host == 'instagr.am';
+    final isTikTok = host.contains('tiktok.com');
+    final isX = host.contains('x.com') || host.contains('twitter.com');
 
-    addIfValid(uri.replace(scheme: 'https', host: 'm.facebook.com').toString());
-    addIfValid(uri.replace(scheme: 'https', host: 'www.facebook.com').toString());
+    if (isFacebook) {
+      addIfValid(uri.replace(scheme: 'https', host: 'm.facebook.com').toString());
+      addIfValid(uri.replace(scheme: 'https', host: 'www.facebook.com').toString());
 
-    final watchId = uri.queryParameters['v'] ?? uri.queryParameters['video_id'];
-    if (watchId != null && watchId.isNotEmpty) {
-      addIfValid('https://m.facebook.com/watch/?v=$watchId');
+      final watchId = uri.queryParameters['v'] ?? uri.queryParameters['video_id'];
+      if (watchId != null && watchId.isNotEmpty) {
+        addIfValid('https://m.facebook.com/watch/?v=$watchId');
+      }
+    }
+
+    if (isInstagram) {
+      addIfValid(uri.replace(scheme: 'https', host: 'www.instagram.com').toString());
+      addIfValid(uri.replace(scheme: 'https', host: 'm.instagram.com').toString());
+
+      final segments = uri.pathSegments;
+      final reelIndex = segments.indexOf('reel');
+      if (reelIndex != -1 && reelIndex + 1 < segments.length) {
+        addIfValid('https://www.instagram.com/reel/${segments[reelIndex + 1]}/');
+      }
+    }
+
+    if (isTikTok) {
+      addIfValid(uri.replace(scheme: 'https', host: 'www.tiktok.com').toString());
+      addIfValid(uri.replace(scheme: 'https', host: 'm.tiktok.com').toString());
+    }
+
+    if (isX) {
+      addIfValid(uri.replace(scheme: 'https', host: 'x.com').toString());
+
+      final statusMatch = RegExp(r'^/([^/]+)/status/(\d+)').firstMatch(uri.path);
+      if (statusMatch != null) {
+        addIfValid(
+          'https://x.com/${statusMatch.group(1)}/status/${statusMatch.group(2)}',
+        );
+      }
     }
 
     return candidates;
@@ -932,6 +967,11 @@ class BrowserProvider extends ChangeNotifier {
     if (forceRefresh && runHeadlessExtractor) {
       _detectedMedia.clear();
     }
+
+    if (runHeadlessExtractor) {
+      final host = Uri.tryParse(_tabs[_activeTabIndex].url)?.host ?? 'current page';
+      unawaited(_processNotifications.showMediaScanStarted(hostLabel: host));
+    }
     notifyListeners();
 
     try {
@@ -967,15 +1007,20 @@ class BrowserProvider extends ChangeNotifier {
 
       if (foundAny) {
         _fetchError = null;
+        unawaited(
+          _processNotifications.showMediaScanResult(count: _detectedMedia.length),
+        );
       }
 
       if (_detectedMedia.isEmpty) {
         _fetchError =
             'No downloadable media found. Play the video first, then tap refresh.';
+        unawaited(_processNotifications.showMediaScanResult(count: 0));
       }
     } catch (e) {
       _fetchError = 'Failed to scan this page for media links.';
       debugPrint('Generic media refresh failed: $e');
+      unawaited(_processNotifications.showMediaScanError(_fetchError!));
     } finally {
       _isFetchingGeneric = false;
       notifyListeners();
@@ -997,6 +1042,9 @@ class BrowserProvider extends ChangeNotifier {
     _resourceHitInsertions = 0;
     _resourceNotifyTimer?.cancel();
     _resourceNotifyPending = false;
+    if (_resolvedSizeByUrl.length > 250) {
+      _resolvedSizeByUrl.clear();
+    }
     _fetchDebounceTimer?.cancel();
     _genericFetchDebounceTimer?.cancel();
     setCurrentUrl(url);
@@ -1017,6 +1065,7 @@ class BrowserProvider extends ChangeNotifier {
     _resourceNotifyTimer?.cancel();
     _sizeProbeQueue.clear();
     _sizeProbeInFlight.clear();
+    _sizeProbeActiveCount = 0;
     _recentResourceHits.clear();
     _resourceHitInsertions = 0;
     _metadataDio.close(force: true);

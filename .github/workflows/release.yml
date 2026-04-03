@@ -36,9 +36,6 @@ jobs:
       - name: Decode Keystore
         run: |
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release-key.jks
-
-      - name: Ensure Gradle wrapper executable
-        run: chmod +x android/gradlew
       
       - name: Build Release APKs (Split Per ABI)
         working-directory: android
@@ -47,7 +44,7 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           STORE_FILE: release-key.jks
-        run: ./gradlew --no-daemon app:assembleRelease
+        run: bash ./gradlew --no-daemon app:assembleRelease
 
       - name: List generated APK files
         run: |

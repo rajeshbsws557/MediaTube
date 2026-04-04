@@ -25,12 +25,12 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
   bool _hasError = false;
   String? _errorText;
 
-  final ProcessNotificationService _processNotifications =
-      ProcessNotificationService();
-  final BackgroundDownloadService _backgroundService =
-      BackgroundDownloadService();
+  final AndroidPlaybackBridgeService _nativePlaybackBridge =
+    AndroidPlaybackBridgeService();
+  StreamSubscription<NativePlaybackControlEvent>? _nativeControlSubscription;
 
   DateTime _lastUiRefreshAt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastNativeRuntimeSyncAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool? _lastKnownIsPlaying;
 
   bool get _isAudioOnly => widget.media.type == MediaType.audio;
@@ -39,8 +39,11 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _processNotifications.setPlaybackActionHandler(
-      _handlePlaybackNotificationAction,
+    unawaited(_nativePlaybackBridge.ensureListening());
+    _nativeControlSubscription = _nativePlaybackBridge.controlEvents.listen(
+      (event) {
+        unawaited(_handleNativePlaybackControlEvent(event));
+      },
     );
     _initializePlayer();
   }
@@ -48,9 +51,16 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _processNotifications.setPlaybackActionHandler(null);
-    unawaited(_processNotifications.clearPlaybackStatus());
-    unawaited(_backgroundService.stopPlaybackService());
+    _nativeControlSubscription?.cancel();
+    unawaited(
+      _nativePlaybackBridge.configurePip(
+        enabled: false,
+        aspectWidth: 16,
+        aspectHeight: 9,
+        autoEnter: false,
+      ),
+    );
+    unawaited(_nativePlaybackBridge.stopMediaSession());
     final controller = _controller;
     if (controller != null) {
       controller.removeListener(_onControllerTick);
@@ -98,6 +108,7 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
       controller.addListener(_onControllerTick);
 
       _controller = controller;
+      await _configurePictureInPicture(controller);
       await _syncPlaybackRuntimeState(isPlaying: true, force: true);
 
       if (!mounted) {
@@ -129,11 +140,16 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     }
 
     final isPlaying = controller.value.isPlaying;
-    if (_lastKnownIsPlaying != isPlaying) {
-      unawaited(_syncPlaybackRuntimeState(isPlaying: isPlaying, force: true));
+    final now = DateTime.now();
+    final shouldSyncNative =
+        _lastKnownIsPlaying != isPlaying ||
+        now.difference(_lastNativeRuntimeSyncAt) >=
+            const Duration(milliseconds: 900);
+
+    if (shouldSyncNative) {
+      unawaited(_syncPlaybackRuntimeState(isPlaying: isPlaying));
     }
 
-    final now = DateTime.now();
     final shouldRefreshUi =
         now.difference(_lastUiRefreshAt) >= const Duration(milliseconds: 220) ||
         controller.value.position >= controller.value.duration;
@@ -144,11 +160,29 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     }
   }
 
-  Future<void> _publishPlaybackNotification({required bool isPlaying}) async {
-    await _processNotifications.showPlaybackStatus(
-      title: widget.media.title,
-      isVideo: !_isAudioOnly,
-      isPlaying: isPlaying,
+  Future<void> _configurePictureInPicture(
+    VideoPlayerController controller,
+  ) async {
+    if (_isAudioOnly) {
+      await _nativePlaybackBridge.configurePip(
+        enabled: false,
+        aspectWidth: 16,
+        aspectHeight: 9,
+        autoEnter: false,
+      );
+      return;
+    }
+
+    final aspectRatio = controller.value.aspectRatio > 0
+        ? controller.value.aspectRatio
+        : 16 / 9;
+    final aspectWidth = (aspectRatio * 1000).round();
+
+    await _nativePlaybackBridge.configurePip(
+      enabled: true,
+      aspectWidth: aspectWidth <= 0 ? 16 : aspectWidth,
+      aspectHeight: 1000,
+      autoEnter: true,
     );
   }
 
@@ -156,56 +190,81 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     required bool isPlaying,
     bool force = false,
   }) async {
-    if (!force && _lastKnownIsPlaying == isPlaying) {
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) {
+      return;
+    }
+
+    final now = DateTime.now();
+    final playbackStateChanged = _lastKnownIsPlaying != isPlaying;
+    final isProgressSyncDue =
+        now.difference(_lastNativeRuntimeSyncAt) >=
+        const Duration(milliseconds: 900);
+
+    if (!force && !playbackStateChanged && !isProgressSyncDue) {
       return;
     }
 
     _lastKnownIsPlaying = isPlaying;
-    await _publishPlaybackNotification(isPlaying: isPlaying);
+    _lastNativeRuntimeSyncAt = now;
 
-    if (isPlaying) {
-      await _backgroundService.startPlaybackService(
-        title: widget.media.title,
-        isVideo: !_isAudioOnly,
-      );
-    } else {
-      await _backgroundService.stopPlaybackService();
-    }
+    await _nativePlaybackBridge.updateMediaSession(
+      title: widget.media.title,
+      subtitle: widget.media.quality ?? (_isAudioOnly ? 'Audio' : 'Video'),
+      duration: controller.value.duration,
+      position: controller.value.position,
+      isPlaying: isPlaying,
+      isVideo: !_isAudioOnly,
+      artworkUri: widget.media.thumbnailUrl,
+      mimeType: _isAudioOnly ? 'audio/mpeg' : 'video/mp4',
+    );
   }
 
-  Future<void> _handlePlaybackNotificationAction(
-    PlaybackNotificationAction action,
+  Future<void> _handleNativePlaybackControlEvent(
+    NativePlaybackControlEvent event,
   ) async {
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) {
       return;
     }
 
-    switch (action) {
-      case PlaybackNotificationAction.togglePlayPause:
+    switch (event.action) {
+      case NativePlaybackControlAction.play:
+        await controller.play();
+        break;
+      case NativePlaybackControlAction.pause:
+        await controller.pause();
+        break;
+      case NativePlaybackControlAction.toggle:
         if (controller.value.isPlaying) {
           await controller.pause();
         } else {
           await controller.play();
         }
-        await _syncPlaybackRuntimeState(
-          isPlaying: controller.value.isPlaying,
-          force: true,
-        );
-        if (mounted) {
-          setState(() {});
-        }
         break;
-      case PlaybackNotificationAction.stopPlayback:
+      case NativePlaybackControlAction.stop:
         await controller.pause();
         await controller.seekTo(Duration.zero);
-        await _syncPlaybackRuntimeState(isPlaying: false, force: true);
-        if (mounted) {
-          setState(() {});
+        break;
+      case NativePlaybackControlAction.seek:
+        final requestedPosition = event.position;
+        if (requestedPosition != null) {
+          final duration = controller.value.duration;
+          final boundedPosition = requestedPosition <= Duration.zero
+              ? Duration.zero
+              : (requestedPosition >= duration ? duration : requestedPosition);
+          await controller.seekTo(boundedPosition);
         }
         break;
-      case PlaybackNotificationAction.openApp:
-        break;
+    }
+
+    await _syncPlaybackRuntimeState(
+      isPlaying: controller.value.isPlaying,
+      force: true,
+    );
+
+    if (mounted) {
+      setState(() {});
     }
   }
 
@@ -274,6 +333,16 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     return Scaffold(
       appBar: AppBar(
         title: const Text('YouTube Playback'),
+        actions: [
+          if (!_isAudioOnly && controller != null && controller.value.isInitialized)
+            IconButton(
+              tooltip: 'Picture in Picture',
+              icon: const Icon(Icons.picture_in_picture_alt),
+              onPressed: () {
+                unawaited(_nativePlaybackBridge.enterPipNow());
+              },
+            ),
+        ],
       ),
       body: Padding(
         padding: const EdgeInsets.all(16),

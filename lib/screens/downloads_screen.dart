@@ -1,10 +1,14 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:open_filex/open_filex.dart';
 import 'dart:io';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:share_plus/share_plus.dart';
 import '../models/models.dart';
 import '../providers/providers.dart';
+import '../services/services.dart';
+import 'nearby_radar_screen.dart';
 
 class DownloadsScreen extends StatefulWidget {
   const DownloadsScreen({super.key});
@@ -16,17 +20,296 @@ class DownloadsScreen extends StatefulWidget {
 class _DownloadsScreenState extends State<DownloadsScreen>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
+  final CastDiscoveryService _castService = CastDiscoveryService();
+  final LocalStreamServerService _localStreamServer = LocalStreamServerService();
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
+    _castService.addListener(_onCastServiceUpdated);
+    unawaited(_initializeCasting());
   }
 
   @override
   void dispose() {
+    _castService.removeListener(_onCastServiceUpdated);
+    unawaited(_castService.stopDiscovery());
     _tabController.dispose();
     super.dispose();
+  }
+
+  void _onCastServiceUpdated() {
+    if (!mounted) {
+      return;
+    }
+    setState(() {});
+  }
+
+  Future<void> _initializeCasting() async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+
+    await _requestCastPermissions();
+    await _castService.ensureInitialized();
+    await _castService.startDiscovery();
+  }
+
+  Future<void> _requestCastPermissions() async {
+    final permissions = <Permission>[
+      Permission.locationWhenInUse,
+      Permission.bluetoothScan,
+      Permission.bluetoothConnect,
+      Permission.nearbyWifiDevices,
+    ];
+
+    for (final permission in permissions) {
+      try {
+        await permission.request();
+      } catch (_) {
+        // Skip unsupported permissions on older Android APIs.
+      }
+    }
+  }
+
+  Future<void> _showCastPanel() async {
+    if (!mounted) {
+      return;
+    }
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (sheetContext) {
+        return SafeArea(
+          child: FractionallySizedBox(
+            heightFactor: 0.85,
+            child: AnimatedBuilder(
+              animation: _castService,
+              builder: (context, _) {
+                final provider = context.watch<DownloadProvider>();
+                final completedVideos = provider.completedDownloads
+                    .where((task) => !task.isAudioOnly)
+                    .toList();
+
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.cast),
+                          const SizedBox(width: 10),
+                          const Expanded(
+                            child: Text(
+                              'Cast to nearby displays',
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          IconButton(
+                            tooltip: 'Rescan',
+                            onPressed: () {
+                              unawaited(_castService.startDiscovery());
+                            },
+                            icon: const Icon(Icons.refresh),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (_castService.lastError != null)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                        child: Text(
+                          _castService.lastError!,
+                          style: const TextStyle(color: Colors.red),
+                        ),
+                      ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Text(
+                        'Displays',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Expanded(
+                      child: _castService.devices.isEmpty
+                          ? const Center(
+                              child: Text(
+                                'No compatible displays detected yet',
+                              ),
+                            )
+                          : ListView.builder(
+                              itemCount: _castService.devices.length,
+                              itemBuilder: (context, index) {
+                                final device = _castService.devices[index];
+                                final isConnected =
+                                    _castService.connectedDeviceId == device.id;
+
+                                return ListTile(
+                                  leading: Icon(
+                                    isConnected
+                                        ? Icons.cast_connected
+                                        : Icons.cast,
+                                  ),
+                                  title: Text(device.name),
+                                  subtitle: Text(
+                                    switch (device.type) {
+                                      CastDeviceType.chromecast => 'Chromecast',
+                                      CastDeviceType.dlna => 'DLNA/Smart TV',
+                                      CastDeviceType.roku => 'Roku',
+                                      CastDeviceType.unknown => 'Display',
+                                    },
+                                  ),
+                                  trailing: FilledButton.tonal(
+                                    onPressed: () async {
+                                      if (isConnected) {
+                                        await _castService.disconnect();
+                                        return;
+                                      }
+                                      await _castService.connectToDevice(device.id);
+                                    },
+                                    child: Text(
+                                      isConnected ? 'Disconnect' : 'Connect',
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                    ),
+                    const Divider(height: 1),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                      child: Text(
+                        'Downloaded videos',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                    SizedBox(
+                      height: 230,
+                      child: completedVideos.isEmpty
+                          ? const Center(child: Text('No completed videos yet'))
+                          : ListView.builder(
+                              itemCount: completedVideos.length,
+                              itemBuilder: (context, index) {
+                                final task = completedVideos[index];
+                                final connected = _castService.connectedDevice;
+
+                                return ListTile(
+                                  leading: const Icon(Icons.play_circle_outline),
+                                  title: Text(
+                                    task.fileName,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  subtitle: Text(task.totalSizeFormatted),
+                                  trailing: IconButton(
+                                    tooltip: connected == null
+                                        ? 'Connect a display first'
+                                        : 'Cast video',
+                                    onPressed: connected == null
+                                        ? null
+                                        : () {
+                                            unawaited(_castDownload(task));
+                                          },
+                                    icon: const Icon(Icons.cast),
+                                  ),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _castDownload(DownloadTask task) async {
+    final connected = _castService.connectedDevice;
+    if (connected == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Connect to a display first.')),
+      );
+      return;
+    }
+
+    final file = File(task.savePath);
+    if (!await file.exists()) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Video file is missing from storage.')),
+      );
+      return;
+    }
+
+    try {
+      final streamUri = await _localStreamServer.registerFile(task.savePath);
+      final success = await _castService.castMedia(
+        preferredDeviceId: connected.id,
+        mediaUrl: streamUri.toString(),
+        title: task.fileName,
+        subtitle: 'MediaTube',
+        mimeType: _mimeTypeForPath(task.savePath),
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            success
+                ? 'Casting ${task.fileName} to ${connected.name}'
+                : 'Failed to start casting on ${connected.name}',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Casting failed: $e')),
+      );
+    }
+  }
+
+  String _mimeTypeForPath(String filePath) {
+    final lower = filePath.toLowerCase();
+    if (lower.endsWith('.mp4') || lower.endsWith('.m4v')) {
+      return 'video/mp4';
+    }
+    if (lower.endsWith('.mkv')) {
+      return 'video/x-matroska';
+    }
+    if (lower.endsWith('.webm')) {
+      return 'video/webm';
+    }
+    if (lower.endsWith('.mp3')) {
+      return 'audio/mpeg';
+    }
+    if (lower.endsWith('.m4a')) {
+      return 'audio/mp4';
+    }
+    return 'application/octet-stream';
+  }
+
+  void _openNearbyRadar() {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const NearbyRadarScreen()),
+    );
   }
 
   @override
@@ -47,6 +330,23 @@ class _DownloadsScreenState extends State<DownloadsScreen>
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'Nearby Radar Share',
+            icon: const Icon(Icons.radar),
+            onPressed: _openNearbyRadar,
+          ),
+          if (_castService.hasCompatibleDevices)
+            IconButton(
+              tooltip: _castService.connectedDevice == null
+                  ? 'Cast'
+                  : 'Cast connected',
+              icon: Icon(
+                _castService.connectedDevice == null
+                    ? Icons.cast
+                    : Icons.cast_connected,
+              ),
+              onPressed: _showCastPanel,
+            ),
           // Use Selector to only rebuild when menu-relevant state changes
           Selector<DownloadProvider, ({bool hasActive, bool hasPaused})>(
             selector: (_, p) => (

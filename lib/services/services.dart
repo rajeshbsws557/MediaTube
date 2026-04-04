@@ -11,3 +11,7 @@ export 'security_service.dart';
 export 'settings_service.dart';
 export 'share_url_service.dart';
 export 'process_notification_service.dart';
+export 'android_playback_bridge_service.dart';
+export 'cast_discovery_service.dart';
+export 'local_stream_server_service.dart';
+export 'nearby_p2p_service.dart';

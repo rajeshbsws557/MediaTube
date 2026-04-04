@@ -2,6 +2,8 @@ name: Build and Release APK
 
 on:
   push:
+    branches:
+      - master
     tags:
       - 'v*'
   workflow_dispatch:
@@ -37,30 +39,32 @@ jobs:
         run: |
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/app/release-key.jks
       
-      - name: Build Release APKs (Split Per ABI)
+      - name: Build Release APK (Obfuscated)
         env:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           STORE_FILE: release-key.jks
         run: |
-          mkdir -p build/app/outputs/flutter-apk
+          flutter build apk --obfuscate --split-debug-info=build/debug-info
 
-          flutter build apk --release --target-platform android-arm64 --no-tree-shake-icons
-          cp build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
-
-          flutter build apk --release --target-platform android-arm --no-tree-shake-icons
-          cp build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
-
-      - name: List generated APK files
+      - name: List generated artifacts
         run: |
           ls -lah build/app/outputs/flutter-apk/
+          ls -lah build/debug-info/
       
-      - name: Upload Split APK Artifacts
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-split-release
-          path: build/app/outputs/flutter-apk/app-*-release.apk
+          name: app-release-obfuscated
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+
+      - name: Upload Split Debug Symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: split-debug-info
+          path: build/debug-info/**
           if-no-files-found: error
       
       - name: Create GitHub Release
@@ -68,7 +72,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            build/app/outputs/flutter-apk/app-*-release.apk
+            build/app/outputs/flutter-apk/app-release.apk
           generate_release_notes: true
           draft: false
           prerelease: false

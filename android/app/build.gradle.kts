@@ -154,6 +154,9 @@ dependencies {
     implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.25.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.google.code.gson:gson:2.10.1")
+    implementation("androidx.media:media:1.7.0")
+    implementation("com.google.android.gms:play-services-cast-framework:22.1.0")
+    implementation("com.google.android.gms:play-services-nearby:19.3.0")
 }
 
 flutter {

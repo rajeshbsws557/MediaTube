@@ -1,18 +1,25 @@
 package com.example.media_tube
 
-import io.flutter.embedding.android.FlutterActivity
+import android.content.res.Configuration
+import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 
-class MainActivity : FlutterActivity() {
+class MainActivity : FlutterFragmentActivity() {
     private var nativeDownloader: NativeDownloader? = null
     private var youtubeExtractor: YoutubeExtractor? = null
     private var androidMuxer: AndroidMuxer? = null
+    private var playbackPlatformBridge: PlaybackPlatformBridge? = null
+    private var castPlatformBridge: CastPlatformBridge? = null
+    private var nearbyPlatformBridge: NearbyPlatformBridge? = null
     
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         nativeDownloader = NativeDownloader(this, flutterEngine)
         youtubeExtractor = YoutubeExtractor(this, flutterEngine)
         androidMuxer = AndroidMuxer(flutterEngine)
+        playbackPlatformBridge = PlaybackPlatformBridge(this, flutterEngine)
+        castPlatformBridge = CastPlatformBridge(this, flutterEngine)
+        nearbyPlatformBridge = NearbyPlatformBridge(this, flutterEngine)
         
         // App Channel
         io.flutter.plugin.common.MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.rajesh.mediatube/app")
@@ -74,8 +81,24 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        castPlatformBridge?.dispose()
+        nearbyPlatformBridge?.dispose()
+        playbackPlatformBridge?.dispose()
         nativeDownloader?.dispose()
         youtubeExtractor?.dispose()
         super.onDestroy()
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        playbackPlatformBridge?.onUserLeaveHint()
+    }
+
+    override fun onPictureInPictureModeChanged(
+        isInPictureInPictureMode: Boolean,
+        newConfig: Configuration,
+    ) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        playbackPlatformBridge?.onPictureInPictureModeChanged(isInPictureInPictureMode)
     }
 }

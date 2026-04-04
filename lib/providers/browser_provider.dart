@@ -15,7 +15,7 @@ class BrowserProvider extends ChangeNotifier {
   final ProcessNotificationService _processNotifications =
       ProcessNotificationService();
 
-  final List<BrowserTab> _tabs = [BrowserTab(url: 'https://youtube.com')];
+  final List<BrowserTab> _tabs = [BrowserTab(url: 'https://m.youtube.com')];
   int _activeTabIndex = 0;
 
   bool _isLoading = false;
@@ -237,7 +237,7 @@ class BrowserProvider extends ChangeNotifier {
   void closeTab(int index) {
     if (_tabs.length <= 1) {
       // Don't close last tab, just reset it
-      _tabs[0] = BrowserTab(url: 'https://youtube.com');
+      _tabs[0] = BrowserTab(url: 'https://m.youtube.com');
       _detectedMedia.clear();
       notifyListeners();
       return;

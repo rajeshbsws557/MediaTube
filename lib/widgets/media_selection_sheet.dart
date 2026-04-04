@@ -344,8 +344,11 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
         .where((m) => m.type == _selectedType)
         .toList();
 
-    final backgroundPlayable = widget.isYouTube
-      ? _pickBackgroundPlayableMedia()
+    final backgroundVideoPlayable = widget.isYouTube
+      ? _pickBackgroundPlayableVideo()
+      : null;
+    final backgroundAudioPlayable = widget.isYouTube
+      ? _pickBackgroundPlayableAudio()
       : null;
 
     return Container(
@@ -377,15 +380,29 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
               ),
             ),
           ],
-          if (backgroundPlayable != null) ...[
+          if (backgroundVideoPlayable != null) ...[
             const SizedBox(height: 8),
             FilledButton.tonalIcon(
               onPressed: () => _startBackgroundPlayback(
                 context,
-                backgroundPlayable,
+                backgroundVideoPlayable,
+              ),
+              icon: const Icon(Icons.play_circle_fill),
+              label: const Text('Play Video in Background / Screen Off'),
+              style: FilledButton.styleFrom(
+                minimumSize: const Size(double.infinity, 44),
+              ),
+            ),
+          ],
+          if (backgroundAudioPlayable != null) ...[
+            const SizedBox(height: 8),
+            FilledButton.tonalIcon(
+              onPressed: () => _startBackgroundPlayback(
+                context,
+                backgroundAudioPlayable,
               ),
               icon: const Icon(Icons.headphones),
-              label: const Text('Play in Background / Screen Off'),
+              label: const Text('Play Audio in Background / Screen Off'),
               style: FilledButton.styleFrom(
                 minimumSize: const Size(double.infinity, 44),
               ),
@@ -396,37 +413,45 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
     );
   }
 
-  DetectedMedia? _pickBackgroundPlayableMedia() {
+  DetectedMedia? _pickBackgroundPlayableAudio() {
     final fromYoutube = widget.media
-        .where((m) => m.source == MediaSource.youtube)
+        .where((m) => m.source == MediaSource.youtube && m.type == MediaType.audio)
         .toList();
     if (fromYoutube.isEmpty) {
       return null;
     }
 
-    final audio = fromYoutube.where((m) => m.type == MediaType.audio).toList();
-    if (audio.isNotEmpty) {
-      audio.sort((a, b) {
-        final scoreA = _extractBitrateScore(a.quality ?? '');
-        final scoreB = _extractBitrateScore(b.quality ?? '');
-        return scoreB.compareTo(scoreA);
-      });
-      return audio.first;
-    }
+    fromYoutube.sort((a, b) {
+      final scoreA = _extractBitrateScore(a.quality ?? '');
+      final scoreB = _extractBitrateScore(b.quality ?? '');
+      return scoreB.compareTo(scoreA);
+    });
+    return fromYoutube.first;
+  }
 
-    final nonDashVideos = fromYoutube
-        .where((m) => m.type == MediaType.video && !m.isDash)
+  DetectedMedia? _pickBackgroundPlayableVideo() {
+    final fromYoutube = widget.media
+        .where((m) => m.source == MediaSource.youtube && m.type == MediaType.video)
         .toList();
-    if (nonDashVideos.isNotEmpty) {
-      nonDashVideos.sort((a, b) {
-        final scoreA = _extractResolutionScore(a.quality ?? '');
-        final scoreB = _extractResolutionScore(b.quality ?? '');
-        return scoreB.compareTo(scoreA);
-      });
-      return nonDashVideos.first;
+    if (fromYoutube.isEmpty) {
+      return null;
     }
 
-    return null;
+    final nonDashVideos = fromYoutube.where((m) => !m.isDash).toList();
+    final candidates = nonDashVideos.isNotEmpty ? nonDashVideos : fromYoutube;
+
+    candidates.sort((a, b) {
+      final scoreA = _extractResolutionScore(a.quality ?? '');
+      final scoreB = _extractResolutionScore(b.quality ?? '');
+      if (scoreA != scoreB) {
+        return scoreB.compareTo(scoreA);
+      }
+      final sizeA = a.fileSize ?? 0;
+      final sizeB = b.fileSize ?? 0;
+      return sizeB.compareTo(sizeA);
+    });
+
+    return candidates.first;
   }
 
   int _extractBitrateScore(String quality) {

@@ -9,13 +9,13 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
-import 'package:dynamic_color/dynamic_color.dart';
 import 'models/models.dart';
 import 'providers/providers.dart';
 import 'screens/screens.dart';
 import 'services/services.dart';
 import 'dart:ui';
 import 'dart:isolate';
+import 'dart:async';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -80,41 +80,221 @@ class MediaTubeApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    const youtubeRed = Color(0xFFFF0000);
+    final lightScheme = ColorScheme.fromSeed(
+      seedColor: youtubeRed,
+      brightness: Brightness.light,
+    ).copyWith(
+      primary: youtubeRed,
+      secondary: youtubeRed,
+      onPrimary: Colors.white,
+    );
+
+    final darkScheme = ColorScheme.fromSeed(
+      seedColor: youtubeRed,
+      brightness: Brightness.dark,
+    ).copyWith(
+      primary: youtubeRed,
+      secondary: youtubeRed,
+      onPrimary: Colors.white,
+    );
+
     return MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => BrowserProvider()),
         ChangeNotifierProvider(create: (_) => DownloadProvider()),
         ChangeNotifierProvider(create: (_) => SettingsProvider()),
       ],
-      child: DynamicColorBuilder(
-        builder: (ColorScheme? lightDynamic, ColorScheme? darkDynamic) {
-          ColorScheme lightScheme;
-          ColorScheme darkScheme;
+      child: MaterialApp(
+        title: 'MediaTube',
+        debugShowCheckedModeBanner: false,
+        scaffoldMessengerKey: scaffoldMessengerKey,
+        theme: ThemeData(
+          colorScheme: lightScheme,
+          useMaterial3: true,
+          appBarTheme: const AppBarTheme(
+            elevation: 0,
+            scrolledUnderElevation: 0,
+          ),
+          navigationBarTheme: NavigationBarThemeData(
+            indicatorColor: youtubeRed.withAlpha(36),
+          ),
+        ),
+        darkTheme: ThemeData(
+          colorScheme: darkScheme,
+          useMaterial3: true,
+          appBarTheme: const AppBarTheme(
+            elevation: 0,
+            scrolledUnderElevation: 0,
+          ),
+          navigationBarTheme: NavigationBarThemeData(
+            indicatorColor: youtubeRed.withAlpha(50),
+          ),
+        ),
+        themeMode: ThemeMode.system,
+        home: const MediaTubeBootstrap(),
+      ),
+    );
+  }
+}
 
-          if (lightDynamic != null && darkDynamic != null) {
-            lightScheme = lightDynamic.harmonized();
-            darkScheme = darkDynamic.harmonized();
-          } else {
-            lightScheme = ColorScheme.fromSeed(
-              seedColor: Colors.deepPurple,
-              brightness: Brightness.light,
-            );
-            darkScheme = ColorScheme.fromSeed(
-              seedColor: Colors.deepPurple,
-              brightness: Brightness.dark,
-            );
-          }
+class MediaTubeBootstrap extends StatefulWidget {
+  const MediaTubeBootstrap({super.key});
 
-          return MaterialApp(
-            title: 'MediaTube',
-            debugShowCheckedModeBanner: false,
-            scaffoldMessengerKey: scaffoldMessengerKey,
-            theme: ThemeData(colorScheme: lightScheme, useMaterial3: true),
-            darkTheme: ThemeData(colorScheme: darkScheme, useMaterial3: true),
-            themeMode: ThemeMode.system,
-            home: const MediaTubeHome(),
-          );
-        },
+  @override
+  State<MediaTubeBootstrap> createState() => _MediaTubeBootstrapState();
+}
+
+class _MediaTubeBootstrapState extends State<MediaTubeBootstrap> {
+  static const Duration _splashDuration = Duration(milliseconds: 2400);
+  Timer? _splashTimer;
+  bool _showMainApp = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _splashTimer = Timer(_splashDuration, () {
+      if (!mounted) return;
+      setState(() {
+        _showMainApp = true;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _splashTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 450),
+      switchInCurve: Curves.easeOutCubic,
+      switchOutCurve: Curves.easeInCubic,
+      child: _showMainApp
+          ? const MediaTubeHome(key: ValueKey('home'))
+          : const MediaTubeSplashScreen(key: ValueKey('splash')),
+    );
+  }
+}
+
+class MediaTubeSplashScreen extends StatelessWidget {
+  const MediaTubeSplashScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+
+    return Scaffold(
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Color(0xFF080808),
+              Color(0xFF151515),
+              Color(0xFF2A0000),
+            ],
+            stops: [0.0, 0.58, 1.0],
+          ),
+        ),
+        child: Stack(
+          children: [
+            Positioned(
+              top: -64,
+              right: -38,
+              child: Container(
+                width: 220,
+                height: 220,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.red.withAlpha(28),
+                ),
+              ),
+            ),
+            Positioned(
+              bottom: -74,
+              left: -34,
+              child: Container(
+                width: 240,
+                height: 240,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.white.withAlpha(16),
+                ),
+              ),
+            ),
+            SafeArea(
+              child: Column(
+                children: [
+                  const Spacer(flex: 2),
+                  TweenAnimationBuilder<double>(
+                    tween: Tween<double>(begin: 0.9, end: 1),
+                    duration: const Duration(milliseconds: 900),
+                    curve: Curves.easeOutBack,
+                    builder: (context, scale, child) => Transform.scale(
+                      scale: scale,
+                      child: child,
+                    ),
+                    child: Container(
+                      width: 124,
+                      height: 124,
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(36),
+                        boxShadow: const [
+                          BoxShadow(
+                            color: Color(0x66FF0000),
+                            blurRadius: 24,
+                            spreadRadius: 2,
+                          ),
+                        ],
+                      ),
+                      child: Image.asset(
+                        'assets/icon.png',
+                        fit: BoxFit.contain,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Text(
+                    'MediaTube',
+                    style: textTheme.headlineSmall?.copyWith(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.4,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Fast media browsing and capture',
+                    style: textTheme.bodyMedium?.copyWith(
+                      color: Colors.white.withAlpha(190),
+                      letterSpacing: 0.2,
+                    ),
+                  ),
+                  const Spacer(flex: 3),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 20),
+                    child: Text(
+                      'Developed By Rajesh Biswas',
+                      textAlign: TextAlign.center,
+                      style: textTheme.bodyMedium?.copyWith(
+                        color: Colors.white.withAlpha(180),
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.6,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -24,10 +24,10 @@ class _BrowserScreenState extends State<BrowserScreen>
 
   // Start with YouTube
   String _currentUrl = 'https://m.youtube.com';
-  bool _showHomePage = true;
+  bool _showHomePage = false;
 
   // Track if WebView has ever been created (to avoid recreating it)
-  bool _webViewEverCreated = false;
+  bool _webViewEverCreated = true;
 
   // Flag to track if current session is from Share-to-Download
   bool _isShareToDownload = false;
@@ -271,7 +271,7 @@ class _BrowserScreenState extends State<BrowserScreen>
   }
 
   bool _isWebViewReady = false; // Tracks if WebView is fully created
-  bool _isUrlBarVisible = true;
+  bool _isUrlBarVisible = false;
   int _lastScrollY = 0;
 
   void _loadUrl(String url) {

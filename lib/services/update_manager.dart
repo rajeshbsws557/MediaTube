@@ -30,8 +30,7 @@ class AppVersionInfo {
     String apkUrl = '';
     final assetsRaw = json['assets'];
     if (assetsRaw is List) {
-      Map<String, dynamic>? arm64;
-      Map<String, dynamic>? anyApk;
+      final apkAssets = <Map<String, dynamic>>[];
 
       for (final asset in assetsRaw) {
         if (asset is! Map) {
@@ -40,15 +39,12 @@ class AppVersionInfo {
         final map = Map<String, dynamic>.from(asset);
         final name = (map['name'] ?? '').toString().toLowerCase();
 
-        if (arm64 == null && name.contains('arm64')) {
-          arm64 = map;
-        }
-        if (anyApk == null && name.endsWith('.apk')) {
-          anyApk = map;
+        if (name.endsWith('.apk')) {
+          apkAssets.add(map);
         }
       }
 
-      final selected = arm64 ?? anyApk;
+      final selected = _pickPreferredApkAsset(apkAssets);
       if (selected != null) {
         apkUrl = (selected['browser_download_url'] ?? '').toString();
       }
@@ -59,6 +55,37 @@ class AppVersionInfo {
       changelog: (json['body'] ?? 'No changelog available.').toString(),
       downloadUrl: apkUrl,
     );
+  }
+
+  static Map<String, dynamic>? _pickPreferredApkAsset(
+    List<Map<String, dynamic>> apkAssets,
+  ) {
+    if (apkAssets.isEmpty) {
+      return null;
+    }
+
+    const preferenceOrder = <String>[
+      'arm64-v8a',
+      'arm64_v8a',
+      'arm64',
+      'universal',
+      'armeabi-v7a',
+      'armeabi_v7a',
+      'armeabi',
+      'x86_64',
+      'x86',
+    ];
+
+    for (final token in preferenceOrder) {
+      for (final asset in apkAssets) {
+        final name = (asset['name'] ?? '').toString().toLowerCase();
+        if (name.contains(token)) {
+          return asset;
+        }
+      }
+    }
+
+    return apkAssets.first;
   }
 }
 

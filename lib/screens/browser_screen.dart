@@ -312,6 +312,7 @@ class _BrowserScreenState extends State<BrowserScreen>
           (() => {
             const videos = Array.from(document.querySelectorAll('video'));
             let shouldContinue = false;
+            const pageHidden = document.hidden || document.visibilityState === 'hidden';
 
             videos.forEach((video) => {
               if (video.ended) {
@@ -329,6 +330,16 @@ class _BrowserScreenState extends State<BrowserScreen>
               }
 
               if (video.dataset.mtUserIntent === 'play') {
+                video.dataset.mtBackgroundPlay = 'true';
+                shouldContinue = true;
+                return;
+              }
+
+              const hasProgress = (video.currentTime || 0) > 0;
+              if (pageHidden && hasProgress) {
+                // Page-hidden pauses are often system/lifecycle pauses, not user intent.
+                video.dataset.mtUserIntent = 'play';
+                video.dataset.mtBackgroundPlay = 'true';
                 shouldContinue = true;
               }
             });
@@ -340,8 +351,8 @@ class _BrowserScreenState extends State<BrowserScreen>
 
       _wasVideoPlayingBeforeBackground = result == true || result?.toString() == 'true';
     } catch (e) {
-      // If intent cannot be resolved, avoid accidental autoplay on background.
-      _wasVideoPlayingBeforeBackground = false;
+      // Fall back to current foreground protection state for resilience.
+      _wasVideoPlayingBeforeBackground = _playbackForegroundProtectionEnabled;
       debugPrint('Failed to capture playback intent: $e');
     }
 
@@ -576,6 +587,8 @@ class _BrowserScreenState extends State<BrowserScreen>
 
             const markIntentFromState = (video) => {
               try {
+                const pageHidden = document.hidden || document.visibilityState === 'hidden';
+
                 if (video.ended) {
                   video.dataset.mtUserIntent = 'pause';
                   delete video.dataset.mtBackgroundPlay;
@@ -588,9 +601,16 @@ class _BrowserScreenState extends State<BrowserScreen>
                   return;
                 }
 
-                if (video.dataset.mtUserIntent !== 'play') {
-                  video.dataset.mtUserIntent = 'pause';
+                if (video.dataset.mtUserIntent === 'play') {
+                  // Keep play intent when pause happens while app/page is hidden.
+                  if (pageHidden || (video.currentTime || 0) > 0) {
+                    video.dataset.mtBackgroundPlay = 'true';
+                    return;
+                  }
                 }
+
+                video.dataset.mtUserIntent = 'pause';
+                delete video.dataset.mtBackgroundPlay;
               } catch (_) {}
             };
 
@@ -612,6 +632,15 @@ class _BrowserScreenState extends State<BrowserScreen>
               const markPause = () => {
                 try {
                   if (!video.ended) {
+                    const pageHidden =
+                      document.hidden || document.visibilityState === 'hidden';
+
+                    if (pageHidden && video.dataset.mtUserIntent === 'play') {
+                      // Keep intent if pause was caused by lifecycle/backgrounding.
+                      video.dataset.mtBackgroundPlay = 'true';
+                      return;
+                    }
+
                     video.dataset.mtUserIntent = 'pause';
                     delete video.dataset.mtBackgroundPlay;
                   }
@@ -691,8 +720,17 @@ class _BrowserScreenState extends State<BrowserScreen>
                   }
 
                   if (video.dataset.mtUserIntent === 'pause') {
-                    delete video.dataset.mtBackgroundPlay;
-                    return;
+                    const pageHidden =
+                      document.hidden || document.visibilityState === 'hidden';
+                    const hasProgress = (video.currentTime || 0) > 0;
+
+                    if (pageHidden && hasProgress) {
+                      video.dataset.mtUserIntent = 'play';
+                      video.dataset.mtBackgroundPlay = 'true';
+                    } else {
+                      delete video.dataset.mtBackgroundPlay;
+                      return;
+                    }
                   }
 
                   if (!video.paused) {
@@ -783,8 +821,17 @@ class _BrowserScreenState extends State<BrowserScreen>
                   }
 
                   if (video.dataset.mtUserIntent === 'pause') {
-                    delete video.dataset.mtBackgroundPlay;
-                    return;
+                    const pageHidden =
+                      document.hidden || document.visibilityState === 'hidden';
+                    const hasProgress = (video.currentTime || 0) > 0;
+
+                    if (pageHidden && hasProgress) {
+                      video.dataset.mtUserIntent = 'play';
+                      video.dataset.mtBackgroundPlay = 'true';
+                    } else {
+                      delete video.dataset.mtBackgroundPlay;
+                      return;
+                    }
                   }
 
                   // Mark currently playing videos for background continuation.

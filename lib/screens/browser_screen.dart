@@ -83,19 +83,23 @@ class _BrowserScreenState extends State<BrowserScreen>
   Offset _streamFabNormalized = const Offset(0.88, 0.60);
 
   Timer? _backgroundPlaybackTimer;
+  Timer? _foregroundPlaybackIntentPollTimer;
   Timer? _fabPersistDebounce;
   bool _backgroundPlaybackAutomationInProgress = false;
   int _backgroundPlaybackAutomationEpoch = 0;
   bool _backgroundPlaybackTickInProgress = false;
+  bool _foregroundPlaybackIntentPollInProgress = false;
   bool _isCapturingPlaybackIntentForBackground = false;
   DateTime _lastBackgroundLifecycleCaptureAt =
       DateTime.fromMillisecondsSinceEpoch(0);
   int _consecutiveNoPlaybackDetections = 0;
   String _lastPlaybackForegroundTitle = '';
   String _lastKnownPlaybackTitle = 'MediaTube';
+  bool _lastForegroundPlaybackIntentPlay = false;
   bool _wasVideoPlayingBeforeBackground = false;
 
   static const Duration _backgroundPlaybackTickInterval = Duration(seconds: 6);
+  static const Duration _foregroundIntentPollInterval = Duration(milliseconds: 1200);
   static const Duration _backgroundLifecycleDebounce = Duration(milliseconds: 180);
   static const int _maxNoPlaybackDetectionsBeforeStop = 3;
 
@@ -103,7 +107,10 @@ class _BrowserScreenState extends State<BrowserScreen>
 
   final BackgroundDownloadService _backgroundService =
       BackgroundDownloadService();
+    final AndroidPlaybackBridgeService _nativePlaybackBridge =
+      AndroidPlaybackBridgeService();
   bool _playbackForegroundProtectionEnabled = false;
+    bool _browserPipConfigured = false;
 
   int _profileFrameSampleCount = 0;
   int _profileJankyFrameCount = 0;
@@ -147,6 +154,7 @@ class _BrowserScreenState extends State<BrowserScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _attachFrameTimingProbe();
+    unawaited(_nativePlaybackBridge.ensureListening());
     _omniMenuController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 280),
@@ -170,6 +178,7 @@ class _BrowserScreenState extends State<BrowserScreen>
       _browserProviderRef!.addListener(_checkAndProcessPendingUrl);
       // Check immediately in case a URL was set before listener attached
       _checkAndProcessPendingUrl();
+      _startForegroundPlaybackIntentPolling();
     });
   }
 
@@ -178,7 +187,9 @@ class _BrowserScreenState extends State<BrowserScreen>
     WidgetsBinding.instance.removeObserver(this);
     _detachFrameTimingProbe();
     _browserProviderRef?.removeListener(_checkAndProcessPendingUrl);
+    _stopForegroundPlaybackIntentPolling();
     _stopBackgroundPlaybackAutomationLoop();
+    unawaited(_configureBrowserPip(enabled: false));
     unawaited(_stopPlaybackForegroundProtection());
     _fabPersistDebounce?.cancel();
     _chromeAutoHideTimer?.cancel();
@@ -258,6 +269,7 @@ class _BrowserScreenState extends State<BrowserScreen>
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
+      _stopForegroundPlaybackIntentPolling();
       final now = DateTime.now();
       if (now.difference(_lastBackgroundLifecycleCaptureAt) >=
           _backgroundLifecycleDebounce) {
@@ -272,6 +284,8 @@ class _BrowserScreenState extends State<BrowserScreen>
           _backgroundPlaybackTimer != null || _backgroundPlaybackAutomationInProgress;
       _stopBackgroundPlaybackAutomationLoop();
       _isCapturingPlaybackIntentForBackground = false;
+      _startForegroundPlaybackIntentPolling();
+      unawaited(_configureBrowserPip(enabled: false));
       unawaited(_stopPlaybackForegroundProtection());
       if (hadBackgroundLoop && _wasVideoPlayingBeforeBackground) {
         unawaited(_forceCurrentVideoPlayback(delayMs: 220));
@@ -284,8 +298,120 @@ class _BrowserScreenState extends State<BrowserScreen>
     }
 
     if (state == AppLifecycleState.detached) {
+      _stopForegroundPlaybackIntentPolling();
       _stopBackgroundPlaybackAutomationLoop();
+      unawaited(_configureBrowserPip(enabled: false));
       unawaited(_stopPlaybackForegroundProtection());
+    }
+  }
+
+  void _startForegroundPlaybackIntentPolling() {
+    if (_foregroundPlaybackIntentPollTimer != null) {
+      return;
+    }
+
+    _foregroundPlaybackIntentPollTimer = Timer.periodic(
+      _foregroundIntentPollInterval,
+      (_) {
+        if (!mounted || _isCapturingPlaybackIntentForBackground) {
+          return;
+        }
+
+        unawaited(_refreshForegroundPlaybackIntentFromWebView());
+      },
+    );
+
+    unawaited(_refreshForegroundPlaybackIntentFromWebView());
+  }
+
+  void _stopForegroundPlaybackIntentPolling() {
+    _foregroundPlaybackIntentPollTimer?.cancel();
+    _foregroundPlaybackIntentPollTimer = null;
+    _foregroundPlaybackIntentPollInProgress = false;
+  }
+
+  Future<void> _refreshForegroundPlaybackIntentFromWebView() async {
+    if (_foregroundPlaybackIntentPollInProgress) {
+      return;
+    }
+
+    final controller = _webViewController;
+    if (controller == null) {
+      return;
+    }
+
+    _foregroundPlaybackIntentPollInProgress = true;
+    try {
+      await _injectPlaybackIntentHooksIfNeeded();
+      final result = await controller.evaluateJavascript(
+        source: '''
+          (() => {
+            const videos = Array.from(document.querySelectorAll('video'));
+            let shouldContinue = false;
+
+            videos.forEach((video) => {
+              if (video.ended) {
+                video.dataset.mtUserIntent = 'pause';
+                delete video.dataset.mtBackgroundPlay;
+                return;
+              }
+
+              const isActivelyPlaying = !video.paused && video.readyState > 2;
+              if (isActivelyPlaying) {
+                video.dataset.mtUserIntent = 'play';
+                video.dataset.mtBackgroundPlay = 'true';
+                shouldContinue = true;
+                return;
+              }
+
+              if (video.dataset.mtUserIntent === 'play') {
+                video.dataset.mtBackgroundPlay = 'true';
+                shouldContinue = true;
+              }
+            });
+
+            return shouldContinue;
+          })();
+        ''',
+      );
+
+      _lastForegroundPlaybackIntentPlay =
+          result == true || result?.toString() == 'true';
+    } catch (_) {
+      // Keep previous value when WebView is between lifecycle states.
+    } finally {
+      _foregroundPlaybackIntentPollInProgress = false;
+    }
+  }
+
+  Future<void> _configureBrowserPip({required bool enabled}) async {
+    if (_browserPipConfigured == enabled) {
+      return;
+    }
+
+    try {
+      await _nativePlaybackBridge.configurePip(
+        enabled: enabled,
+        aspectWidth: 16,
+        aspectHeight: 9,
+        autoEnter: enabled,
+      );
+      _browserPipConfigured = enabled;
+    } catch (e) {
+      debugPrint('Browser PiP configuration failed: $e');
+    }
+  }
+
+  Future<void> _requestBrowserPipHandoff() async {
+    if (_showHomePage) {
+      return;
+    }
+
+    await _configureBrowserPip(enabled: true);
+    try {
+      await _nativePlaybackBridge.enterPipNow();
+    } catch (e) {
+      debugPrint('Browser PiP handoff failed: $e');
     }
   }
 
@@ -300,10 +426,12 @@ class _BrowserScreenState extends State<BrowserScreen>
 
     final controller = _webViewController;
     if (controller == null) {
-      _wasVideoPlayingBeforeBackground = false;
+      _wasVideoPlayingBeforeBackground = _lastForegroundPlaybackIntentPlay;
       _isCapturingPlaybackIntentForBackground = false;
       return;
     }
+
+    var shouldContinue = _lastForegroundPlaybackIntentPlay;
 
     try {
       await _injectPlaybackIntentHooksIfNeeded();
@@ -347,22 +475,30 @@ class _BrowserScreenState extends State<BrowserScreen>
             return shouldContinue;
           })();
         ''',
+      ).timeout(
+        const Duration(milliseconds: 550),
+        onTimeout: () => _lastForegroundPlaybackIntentPlay,
       );
 
-      _wasVideoPlayingBeforeBackground = result == true || result?.toString() == 'true';
+      shouldContinue = result == true || result?.toString() == 'true';
     } catch (e) {
-      // Fall back to current foreground protection state for resilience.
-      _wasVideoPlayingBeforeBackground = _playbackForegroundProtectionEnabled;
+      // Fall back to cached foreground intent for fast background transitions.
+      shouldContinue =
+          _lastForegroundPlaybackIntentPlay || _playbackForegroundProtectionEnabled;
       debugPrint('Failed to capture playback intent: $e');
     }
 
+    _wasVideoPlayingBeforeBackground = shouldContinue;
+
     if (_wasVideoPlayingBeforeBackground) {
+      unawaited(_requestBrowserPipHandoff());
       unawaited(
         _activateBackgroundPlaybackAutomation(usePlaybackDelay: true),
       );
     } else {
       // Video was paused by user — don't start background playback,
       // but do stop any existing foreground protection.
+      unawaited(_configureBrowserPip(enabled: false));
       _stopBackgroundPlaybackAutomationLoop();
       unawaited(_stopPlaybackForegroundProtection());
     }
@@ -2084,6 +2220,7 @@ class _BrowserScreenState extends State<BrowserScreen>
             onWebViewCreated: (controller) {
               _webViewController = controller;
               _isWebViewReady = true;
+              _startForegroundPlaybackIntentPolling();
 
               final provider = context.read<BrowserProvider>();
               unawaited(_syncRequestInterceptionMode(provider, force: true));
@@ -2093,6 +2230,7 @@ class _BrowserScreenState extends State<BrowserScreen>
               provider.setLoading(true);
               _keepAlivePlaybackScriptInjected = false;
               _playbackIntentHooksInjected = false;
+              _lastForegroundPlaybackIntentPlay = false;
               unawaited(_syncRequestInterceptionMode(provider));
               _urlController.text = url?.toString() ?? '';
             },
@@ -2196,6 +2334,7 @@ class _BrowserScreenState extends State<BrowserScreen>
               if (provider.isYouTubePage) {
                 unawaited(_injectPlaybackIntentHooksIfNeeded());
                 unawaited(_injectPlaybackKeepAliveScript());
+                unawaited(_refreshForegroundPlaybackIntentFromWebView());
               }
 
               unawaited(_syncRequestInterceptionMode(provider));
@@ -2329,6 +2468,7 @@ class _BrowserScreenState extends State<BrowserScreen>
       _showHomePage = true;
       _isUrlBarVisible = false;
       _isChromeVisible = true;
+      _lastForegroundPlaybackIntentPlay = false;
       // Don't destroy WebView — keep it alive offstage for instant return.
     });
     _chromeAutoHideTimer?.cancel();

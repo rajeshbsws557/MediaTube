@@ -70,16 +70,16 @@ class BrowserProvider extends ChangeNotifier {
   final Set<String> _sizeProbeInFlight = <String>{};
   final Map<String, int> _resolvedSizeByUrl = <String, int>{};
   int _sizeProbeActiveCount = 0;
-  static const int _maxConcurrentSizeProbes = 3;
-  static const int _maxSizeProbeQueueLength = 20;
+  static const int _maxConcurrentSizeProbes = 2;
+  static const int _maxSizeProbeQueueLength = 12;
 
   final Map<String, int> _recentResourceHits = <String, int>{};
   int _resourceHitInsertions = 0;
   Timer? _resourceNotifyTimer;
   bool _resourceNotifyPending = false;
-  static const int _resourceDedupWindowMs = 2500;
-  static const int _maxRecentResourceEntries = 600;
-  static const Duration _resourceNotifyInterval = Duration(milliseconds: 120);
+  static const int _resourceDedupWindowMs = 4000;
+  static const int _maxRecentResourceEntries = 360;
+  static const Duration _resourceNotifyInterval = Duration(milliseconds: 220);
   static const Set<String> _resourceDedupVolatileParams = {
     'bytestart',
     'byteend',

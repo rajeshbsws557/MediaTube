@@ -33,7 +33,7 @@ class AppConfig {
       'https://github.com/$githubRepoOwner/$githubRepoName/releases';
 
   /// Current app version (should match pubspec.yaml)
-  static const String appVersion = '1.0.3';
+  static const String appVersion = '1.0.4';
 
   // ============================================================
   // SECURITY CONFIGURATION

@@ -85,6 +85,13 @@ class _BrowserScreenState extends State<BrowserScreen>
   Timer? _fabPersistDebounce;
   bool _backgroundPlaybackAutomationInProgress = false;
   int _backgroundPlaybackAutomationEpoch = 0;
+  bool _backgroundPlaybackTickInProgress = false;
+  int _consecutiveNoPlaybackDetections = 0;
+  String _lastPlaybackForegroundTitle = '';
+  String _lastKnownPlaybackTitle = 'MediaTube';
+
+  static const Duration _backgroundPlaybackTickInterval = Duration(seconds: 4);
+  static const int _maxNoPlaybackDetectionsBeforeStop = 3;
 
   final BackgroundDownloadService _backgroundService =
       BackgroundDownloadService();
@@ -250,9 +257,13 @@ class _BrowserScreenState extends State<BrowserScreen>
     }
 
     if (state == AppLifecycleState.resumed) {
+      final hadBackgroundLoop =
+          _backgroundPlaybackTimer != null || _backgroundPlaybackAutomationInProgress;
       _stopBackgroundPlaybackAutomationLoop();
       unawaited(_stopPlaybackForegroundProtection());
-      unawaited(_forceCurrentVideoPlayback());
+      if (hadBackgroundLoop) {
+        unawaited(_forceCurrentVideoPlayback(delayMs: 220));
+      }
       _checkClipboardForMedia();
       return;
     }
@@ -272,8 +283,13 @@ class _BrowserScreenState extends State<BrowserScreen>
 
     _backgroundPlaybackAutomationInProgress = true;
     final epoch = ++_backgroundPlaybackAutomationEpoch;
+    _consecutiveNoPlaybackDetections = 0;
 
     try {
+      final bootstrapTitle = _derivePlaybackForegroundTitle();
+      _lastKnownPlaybackTitle = bootstrapTitle;
+      await _ensurePlaybackForegroundProtection(title: bootstrapTitle);
+
       await _injectPlaybackKeepAliveScript();
       if (!mounted || epoch != _backgroundPlaybackAutomationEpoch) {
         return;
@@ -291,16 +307,25 @@ class _BrowserScreenState extends State<BrowserScreen>
 
       _backgroundPlaybackTimer?.cancel();
       _backgroundPlaybackTimer = Timer.periodic(
-        const Duration(seconds: 2),
+        _backgroundPlaybackTickInterval,
         (timer) {
           if (!mounted || epoch != _backgroundPlaybackAutomationEpoch) {
             timer.cancel();
             return;
           }
 
+          if (_backgroundPlaybackTickInProgress) {
+            return;
+          }
+
           unawaited(() async {
-            await _forceCurrentVideoPlayback(delayMs: 300);
-            await _syncPlaybackForegroundProtection();
+            _backgroundPlaybackTickInProgress = true;
+            try {
+              await _forceCurrentVideoPlayback(delayMs: 250);
+              await _syncPlaybackForegroundProtection();
+            } finally {
+              _backgroundPlaybackTickInProgress = false;
+            }
           }());
         },
       );
@@ -314,13 +339,50 @@ class _BrowserScreenState extends State<BrowserScreen>
     _backgroundPlaybackTimer?.cancel();
     _backgroundPlaybackTimer = null;
     _backgroundPlaybackAutomationInProgress = false;
+    _backgroundPlaybackTickInProgress = false;
+    _consecutiveNoPlaybackDetections = 0;
   }
 
-  Future<void> _syncPlaybackForegroundProtection() async {
+  String _derivePlaybackForegroundTitle() {
+    final providerTitle = _browserProviderRef?.pageTitle.trim() ?? '';
+    if (providerTitle.isNotEmpty) {
+      return providerTitle;
+    }
+
+    final fallback = _urlController.text.trim();
+    if (fallback.isNotEmpty) {
+      return fallback;
+    }
+
+    return 'MediaTube';
+  }
+
+  Future<void> _ensurePlaybackForegroundProtection({
+    required String title,
+  }) async {
+    final normalizedTitle = title.trim().isEmpty ? 'MediaTube' : title.trim();
+    if (_playbackForegroundProtectionEnabled &&
+        _lastPlaybackForegroundTitle == normalizedTitle) {
+      return;
+    }
+
+    await _backgroundService.startPlaybackService(
+      title: normalizedTitle,
+      isVideo: true,
+    );
+    _playbackForegroundProtectionEnabled = true;
+    _lastPlaybackForegroundTitle = normalizedTitle;
+  }
+
+  Future<bool> _syncPlaybackForegroundProtection() async {
     final controller = _webViewController;
     if (controller == null) {
-      await _stopPlaybackForegroundProtection();
-      return;
+      _consecutiveNoPlaybackDetections++;
+      if (_consecutiveNoPlaybackDetections >=
+          _maxNoPlaybackDetectionsBeforeStop) {
+        await _stopPlaybackForegroundProtection();
+      }
+      return false;
     }
 
     try {
@@ -349,14 +411,28 @@ class _BrowserScreenState extends State<BrowserScreen>
       }
 
       if (shouldProtect) {
-        await _backgroundService.startPlaybackService(title: title, isVideo: true);
-        _playbackForegroundProtectionEnabled = true;
-        return;
+        _consecutiveNoPlaybackDetections = 0;
+        _lastKnownPlaybackTitle = title;
+        await _ensurePlaybackForegroundProtection(title: title);
+        return true;
       }
 
-      await _stopPlaybackForegroundProtection();
+      _consecutiveNoPlaybackDetections++;
+      if (_consecutiveNoPlaybackDetections >=
+          _maxNoPlaybackDetectionsBeforeStop) {
+        await _stopPlaybackForegroundProtection();
+      }
+      return false;
     } catch (e) {
       debugPrint('Playback foreground protection sync failed: $e');
+      if (!_playbackForegroundProtectionEnabled) {
+        try {
+          await _ensurePlaybackForegroundProtection(
+            title: _lastKnownPlaybackTitle,
+          );
+        } catch (_) {}
+      }
+      return _playbackForegroundProtectionEnabled;
     }
   }
 
@@ -371,6 +447,7 @@ class _BrowserScreenState extends State<BrowserScreen>
       debugPrint('Failed to stop playback foreground protection: $e');
     } finally {
       _playbackForegroundProtectionEnabled = false;
+      _lastPlaybackForegroundTitle = '';
     }
   }
 
@@ -394,13 +471,22 @@ class _BrowserScreenState extends State<BrowserScreen>
               const videos = Array.from(document.querySelectorAll('video'));
               videos.forEach((video) => {
                 try {
+                  if (video.ended) {
+                    return;
+                  }
+
                   video.setAttribute('playsinline', 'true');
                   video.setAttribute('webkit-playsinline', 'true');
                   video.autoplay = true;
-                  video.muted = false;
-                  const playPromise = video.play();
-                  if (playPromise && typeof playPromise.catch === 'function') {
-                    playPromise.catch(() => {});
+                  if (video.muted) {
+                    video.muted = false;
+                  }
+
+                  if (video.paused) {
+                    const playPromise = video.play();
+                    if (playPromise && typeof playPromise.catch === 'function') {
+                      playPromise.catch(() => {});
+                    }
                   }
                 } catch (_) {}
               });
@@ -415,11 +501,15 @@ class _BrowserScreenState extends State<BrowserScreen>
               } catch (_) {}
             });
 
+            try {
+              document.addEventListener('play', keepPlaying, true);
+            } catch (_) {}
+
             setInterval(() => {
               if (document.hidden) {
                 keepPlaying();
               }
-            }, 1800);
+            }, 3200);
 
             keepPlaying();
             return true;
@@ -452,19 +542,32 @@ class _BrowserScreenState extends State<BrowserScreen>
                 return 0;
               }
 
+              let acted = 0;
+
               videos.forEach((video) => {
                 try {
+                  if (video.ended) {
+                    return;
+                  }
+
                   video.setAttribute('playsinline', 'true');
                   video.setAttribute('webkit-playsinline', 'true');
                   video.autoplay = true;
-                  const playPromise = video.play();
-                  if (playPromise && typeof playPromise.catch === 'function') {
-                    playPromise.catch(() => {});
+                  if (video.muted) {
+                    video.muted = false;
+                  }
+
+                  if (video.paused) {
+                    const playPromise = video.play();
+                    if (playPromise && typeof playPromise.catch === 'function') {
+                      playPromise.catch(() => {});
+                    }
+                    acted += 1;
                   }
                 } catch (_) {}
               });
 
-              return videos.length;
+              return acted;
             };
 
             if (delayMs > 0) {
@@ -1790,6 +1893,10 @@ class _BrowserScreenState extends State<BrowserScreen>
                 canGoBack: canGoBack,
                 canGoForward: canGoForward,
               );
+
+              if (provider.isYouTubePage) {
+                unawaited(_injectPlaybackKeepAliveScript());
+              }
 
               unawaited(_syncRequestInterceptionMode(provider));
             },

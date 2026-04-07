@@ -42,6 +42,16 @@ class AndroidPlaybackBridgeService {
   StreamSubscription<dynamic>? _nativeEventsSubscription;
   bool _isListening = false;
 
+  String? _lastSessionTitle;
+  String? _lastSessionSubtitle;
+  int _lastSessionDurationMs = -1;
+  int _lastSessionPositionMs = -1;
+  bool? _lastSessionIsPlaying;
+  bool? _lastSessionIsVideo;
+  String? _lastSessionArtworkUri;
+  String? _lastSessionMimeType;
+  DateTime _lastSessionDispatchAt = DateTime.fromMillisecondsSinceEpoch(0);
+
   Stream<NativePlaybackControlEvent> get controlEvents => _controlEvents.stream;
   Stream<bool> get pipModeEvents => _pipModeEvents.stream;
 
@@ -142,11 +152,40 @@ class AndroidPlaybackBridgeService {
       return;
     }
 
+    final now = DateTime.now();
+    final durationMs = duration.inMilliseconds;
+    final positionMs = position.inMilliseconds;
+
+    final isLikelyDuplicate =
+        _lastSessionTitle == title &&
+        _lastSessionSubtitle == subtitle &&
+        _lastSessionDurationMs == durationMs &&
+        _lastSessionIsPlaying == isPlaying &&
+        _lastSessionIsVideo == isVideo &&
+        _lastSessionArtworkUri == artworkUri &&
+        _lastSessionMimeType == mimeType &&
+        (positionMs - _lastSessionPositionMs).abs() < 350 &&
+        now.difference(_lastSessionDispatchAt) < const Duration(milliseconds: 700);
+
+    if (isLikelyDuplicate) {
+      return;
+    }
+
+    _lastSessionTitle = title;
+    _lastSessionSubtitle = subtitle;
+    _lastSessionDurationMs = durationMs;
+    _lastSessionPositionMs = positionMs;
+    _lastSessionIsPlaying = isPlaying;
+    _lastSessionIsVideo = isVideo;
+    _lastSessionArtworkUri = artworkUri;
+    _lastSessionMimeType = mimeType;
+    _lastSessionDispatchAt = now;
+
     await _methodChannel.invokeMethod<void>('updateMediaSession', {
       'title': title,
       'subtitle': subtitle,
-      'durationMs': duration.inMilliseconds,
-      'positionMs': position.inMilliseconds,
+      'durationMs': durationMs,
+      'positionMs': positionMs,
       'isPlaying': isPlaying,
       'isVideo': isVideo,
       'artworkUri': artworkUri,
@@ -159,12 +198,24 @@ class AndroidPlaybackBridgeService {
       return;
     }
 
+    _lastSessionTitle = null;
+    _lastSessionSubtitle = null;
+    _lastSessionDurationMs = -1;
+    _lastSessionPositionMs = -1;
+    _lastSessionIsPlaying = null;
+    _lastSessionIsVideo = null;
+    _lastSessionArtworkUri = null;
+    _lastSessionMimeType = null;
+    _lastSessionDispatchAt = DateTime.fromMillisecondsSinceEpoch(0);
+
     await _methodChannel.invokeMethod<void>('stopMediaSession');
   }
 
   Future<void> disposeListeners() async {
+    if (!_isListening) return;
     await _nativeEventsSubscription?.cancel();
     _nativeEventsSubscription = null;
     _isListening = false;
+    await _controlEvents.close();
   }
 }

@@ -8,7 +8,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'models/models.dart';
 import 'providers/providers.dart';
 import 'screens/screens.dart';
@@ -16,6 +15,7 @@ import 'services/services.dart';
 import 'dart:ui';
 import 'dart:isolate';
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
@@ -79,12 +79,6 @@ void main() async {
   // MobileAds.instance.initialize(); // Without await
   // ============================================================
 
-  // Initialize InAppWebView (for Android)
-  if (await WebViewFeature.isFeatureSupported(
-    WebViewFeature.WEB_MESSAGE_LISTENER,
-  )) {
-    // WebView is supported
-  }
 
   // Initialize port for foreground task communication
   FlutterForegroundTask.initCommunicationPort();
@@ -95,18 +89,16 @@ void main() async {
 final GlobalKey<ScaffoldMessengerState> scaffoldMessengerKey =
     GlobalKey<ScaffoldMessengerState>();
 
-double _maxInset(double a, double b) => a > b ? a : b;
-
 EdgeInsets _normalizedSafePadding(MediaQueryData mediaQuery) {
   final keyboardVisible = mediaQuery.viewInsets.bottom > 0;
 
   return EdgeInsets.only(
-    left: _maxInset(mediaQuery.padding.left, mediaQuery.viewPadding.left),
-    top: _maxInset(mediaQuery.padding.top, mediaQuery.viewPadding.top),
-    right: _maxInset(mediaQuery.padding.right, mediaQuery.viewPadding.right),
+    left: math.max(mediaQuery.padding.left, mediaQuery.viewPadding.left),
+    top: math.max(mediaQuery.padding.top, mediaQuery.viewPadding.top),
+    right: math.max(mediaQuery.padding.right, mediaQuery.viewPadding.right),
     bottom: keyboardVisible
         ? mediaQuery.padding.bottom
-        : _maxInset(mediaQuery.padding.bottom, mediaQuery.viewPadding.bottom),
+        : math.max(mediaQuery.padding.bottom, mediaQuery.viewPadding.bottom),
   );
 }
 
@@ -137,8 +129,17 @@ class MediaTubeApp extends StatelessWidget {
     return MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => BrowserProvider()),
-        ChangeNotifierProvider(create: (_) => DownloadProvider()),
         ChangeNotifierProvider(create: (_) => SettingsProvider()),
+        ChangeNotifierProxyProvider<SettingsProvider, DownloadProvider>(
+          create: (_) => DownloadProvider(),
+          update: (_, settings, downloadProvider) {
+            final provider = downloadProvider ?? DownloadProvider();
+            provider.setMaxConcurrentDownloads(
+              settings.maxConcurrentDownloads,
+            );
+            return provider;
+          },
+        ),
       ],
       child: MaterialApp(
         title: 'MediaTube',
@@ -379,7 +380,7 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
   DateTime _lastOpenUpdateCheckAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool _isOpenUpdateCheckRunning = false;
 
-  static const Duration _openUpdateCheckCooldown = Duration(seconds: 20);
+  static const Duration _openUpdateCheckCooldown = Duration(seconds: 2);
 
   @override
   void initState() {
@@ -413,12 +414,12 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
       }
     } else if (state == AppLifecycleState.resumed) {
       _hasSavedOnPause = false;
-      unawaited(_triggerOpenUpdateCheck());
+      unawaited(_triggerOpenUpdateCheck(force: true));
     }
   }
 
   Future<void> _triggerOpenUpdateCheck({bool force = false}) async {
-    if (!mounted || !_permissionsGranted) {
+    if (!mounted) {
       return;
     }
 
@@ -517,7 +518,8 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
                 orElse: () => streams.last, // fallback to lowest res
               );
             }
-            downloadProvider.startDownload(selectedOption);
+            await downloadProvider.startDownload(selectedOption);
+            if (!mounted) return;
             _moveToBackgroundAfterDelay();
           }
         } catch (e) {
@@ -746,8 +748,8 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
   }
 
   Future<void> _runStartupChecks() async {
-    // Give UI time to stabilize completely (non-blocking delay)
-    await Future.delayed(const Duration(seconds: 3));
+    // Wait for the rendered frame pipeline to settle instead of using a fixed delay.
+    await WidgetsBinding.instance.endOfFrame;
 
     try {
       // 1. Verify Security (Anti-Clone) - Fast local check

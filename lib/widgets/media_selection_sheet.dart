@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../models/models.dart';
 import '../providers/providers.dart';
+import '../services/youtube_service.dart';
 import '../screens/youtube_playback_screen.dart';
 
 class MediaSelectionSheet extends StatefulWidget {
@@ -492,8 +493,13 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
       return null;
     }
 
+    final directPlayable = fromYoutube
+        .where(_isDirectBackgroundPlayableVideo)
+        .toList();
     final nonDashVideos = fromYoutube.where((m) => !m.isDash).toList();
-    final candidates = nonDashVideos.isNotEmpty ? nonDashVideos : fromYoutube;
+    final candidates = directPlayable.isNotEmpty
+        ? directPlayable
+        : (nonDashVideos.isNotEmpty ? nonDashVideos : fromYoutube);
 
     candidates.sort((a, b) {
       final scoreA = _extractResolutionScore(a.quality ?? '');
@@ -507,6 +513,85 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
     });
 
     return candidates.first;
+  }
+
+  bool _isDirectBackgroundPlayableVideo(DetectedMedia media) {
+    if (media.type != MediaType.video) {
+      return false;
+    }
+
+    if (media.isDash || media.useBackend) {
+      return false;
+    }
+
+    final uri = Uri.tryParse(media.url);
+    if (uri == null || uri.host.isEmpty) {
+      return false;
+    }
+
+    final scheme = uri.scheme.toLowerCase();
+    if (scheme != 'http' && scheme != 'https') {
+      return false;
+    }
+
+    final host = uri.host.toLowerCase();
+    if (host.contains('youtube.com') || host == 'youtu.be') {
+      return false;
+    }
+
+    return true;
+  }
+
+  String _buildYouTubeLookupUrl(DetectedMedia media) {
+    final videoId = media.videoId?.trim();
+    if (videoId != null && videoId.isNotEmpty) {
+      return 'https://www.youtube.com/watch?v=$videoId';
+    }
+    return media.url;
+  }
+
+  Future<DetectedMedia?> _resolveBackgroundPlaybackMedia(
+    DetectedMedia media,
+  ) async {
+    if (media.source != MediaSource.youtube || media.type != MediaType.video) {
+      return media;
+    }
+
+    if (_isDirectBackgroundPlayableVideo(media)) {
+      return media;
+    }
+
+    final ytService = YouTubeService();
+    final lookupUrl = _buildYouTubeLookupUrl(media);
+
+    final bestMuxed = await ytService.getBestMuxedStream(lookupUrl);
+    if (bestMuxed != null && _isDirectBackgroundPlayableVideo(bestMuxed)) {
+      return bestMuxed;
+    }
+
+    final streams = await ytService.getAvailableStreams(
+      lookupUrl,
+      useBackendForDash: false,
+    );
+    final directCandidates = streams
+        .where(_isDirectBackgroundPlayableVideo)
+        .toList()
+      ..sort((a, b) {
+        final scoreA = _extractResolutionScore(a.quality ?? '');
+        final scoreB = _extractResolutionScore(b.quality ?? '');
+        if (scoreA != scoreB) {
+          return scoreB.compareTo(scoreA);
+        }
+        final sizeA = a.fileSize ?? 0;
+        final sizeB = b.fileSize ?? 0;
+        return sizeB.compareTo(sizeA);
+      });
+
+    if (directCandidates.isNotEmpty) {
+      return directCandidates.first;
+    }
+
+    return null;
   }
 
   int _extractBitrateScore(String quality) {
@@ -532,13 +617,45 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
     DetectedMedia media,
   ) async {
     final navigator = Navigator.of(context, rootNavigator: true);
+    final scaffoldMessenger = ScaffoldMessenger.maybeOf(context);
     Navigator.pop(context);
 
     await Future.delayed(const Duration(milliseconds: 120));
 
+    var playbackMedia = media;
+    if (media.type == MediaType.video) {
+      final resolvedVideo = await _resolveBackgroundPlaybackMedia(media);
+      if (resolvedVideo != null) {
+        playbackMedia = resolvedVideo;
+      } else {
+        final audioFallback = _pickBackgroundPlayableAudio();
+        if (audioFallback != null) {
+          playbackMedia = audioFallback;
+          scaffoldMessenger?.showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Direct video stream unavailable. Switched to background audio.',
+              ),
+              duration: Duration(seconds: 2),
+            ),
+          );
+        } else {
+          scaffoldMessenger?.showSnackBar(
+            const SnackBar(
+              content: Text(
+                'No playable background stream available. Refresh and try again.',
+              ),
+              duration: Duration(seconds: 2),
+            ),
+          );
+          return;
+        }
+      }
+    }
+
     await YoutubePlaybackScreen.pushBackground(
       navigator: navigator,
-      media: media,
+      media: playbackMedia,
     );
   }
 

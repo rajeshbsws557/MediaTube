@@ -58,14 +58,17 @@ class BrowserProvider extends ChangeNotifier {
     'rbuf',
   };
 
-  final Dio _metadataDio = Dio(
-    BaseOptions(
-      connectTimeout: const Duration(seconds: 8),
-      receiveTimeout: const Duration(seconds: 8),
-      followRedirects: true,
-      maxRedirects: 5,
-    ),
-  );
+  Dio? _metadataDioInstance;
+  Dio get _metadataDio {
+    return _metadataDioInstance ??= Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 8),
+        receiveTimeout: const Duration(seconds: 8),
+        followRedirects: true,
+        maxRedirects: 5,
+      ),
+    );
+  }
   final Queue<String> _sizeProbeQueue = Queue<String>();
   final Set<String> _sizeProbeInFlight = <String>{};
   final Map<String, int> _resolvedSizeByUrl = <String, int>{};
@@ -391,7 +394,7 @@ class BrowserProvider extends ChangeNotifier {
     _recentResourceHits[dedupeKey] = now;
     _resourceHitInsertions++;
 
-    if (_resourceHitInsertions % 80 == 0 ||
+    if (_resourceHitInsertions % 160 == 0 ||
         _recentResourceHits.length > _maxRecentResourceEntries) {
       _recentResourceHits.removeWhere(
         (_, seenAt) => now - seenAt > _resourceDedupWindowMs,
@@ -1166,7 +1169,7 @@ class BrowserProvider extends ChangeNotifier {
     _sizeProbeActiveCount = 0;
     _recentResourceHits.clear();
     _resourceHitInsertions = 0;
-    _metadataDio.close(force: true);
+    _metadataDioInstance?.close(force: true);
     _youtubeService.dispose();
     super.dispose();
   }

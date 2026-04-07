@@ -34,6 +34,13 @@ class YoutubePlaybackScreen extends StatefulWidget {
 
 class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     with WidgetsBindingObserver {
+  static const int _maxAutoBackgroundAttempts = 6;
+  static const Duration _autoBackgroundRetryDelay = Duration(milliseconds: 700);
+  static const Duration _uiRefreshInterval = Duration(milliseconds: 320);
+  static const Duration _runtimeSyncInterval = Duration(milliseconds: 900);
+  static const Duration _backgroundLifecycleDebounce = Duration(milliseconds: 180);
+  static const Duration _backgroundRecoveryDelay = Duration(milliseconds: 220);
+
   VideoPlayerController? _controller;
   bool _isInitializing = true;
   bool _hasError = false;
@@ -47,9 +54,21 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
   DateTime _lastNativeRuntimeSyncAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool? _lastKnownIsPlaying;
   bool _hasAutoBackgroundHandoff = false;
+  bool _autoBackgroundHandoffInProgress = false;
+  int _autoBackgroundAttemptCount = 0;
+  Timer? _autoBackgroundRetryTimer;
   bool _isDisposed = false;
+  bool _allowBackgroundContinuation = true;
+  bool _isHandlingLifecycleBackgroundTransition = false;
+  DateTime _lastLifecycleBackgroundHandledAt =
+      DateTime.fromMillisecondsSinceEpoch(0);
   bool _didStopMediaSessionAfterCompletion = false;
   int _activePlaybackSessionId = 0;
+
+  bool? _lastConfiguredPipEnabled;
+  bool? _lastConfiguredPipAutoEnter;
+  int? _lastConfiguredPipAspectWidth;
+  int? _lastConfiguredPipAspectHeight;
 
   bool get _isAudioOnly => widget.media.type == MediaType.audio;
 
@@ -71,6 +90,8 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     _isDisposed = true;
     WidgetsBinding.instance.removeObserver(this);
     _nativeControlSubscription?.cancel();
+    _autoBackgroundRetryTimer?.cancel();
+    _autoBackgroundRetryTimer = null;
     unawaited(
       _nativePlaybackBridge.configurePip(
         enabled: false,
@@ -92,27 +113,95 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     }
 
     if (state == AppLifecycleState.inactive || state == AppLifecycleState.paused) {
-      if (!_isAudioOnly && controller.value.isPlaying) {
-        unawaited(_nativePlaybackBridge.enterPipNow());
+      final now = DateTime.now();
+      if (now.difference(_lastLifecycleBackgroundHandledAt) >=
+          _backgroundLifecycleDebounce) {
+        _lastLifecycleBackgroundHandledAt = now;
+        unawaited(_handleLifecycleBackgroundTransition(controller));
       }
-
-      unawaited(
-        _syncPlaybackRuntimeState(
-          isPlaying: controller.value.isPlaying,
-          force: true,
-        ),
-      );
       return;
     }
 
     if (state == AppLifecycleState.resumed) {
-      unawaited(
-        _syncPlaybackRuntimeState(
-          isPlaying: controller.value.isPlaying,
-          force: true,
-        ),
-      );
+      unawaited(_handleLifecycleResumed(controller));
     }
+  }
+
+  bool _isControllerActive(VideoPlayerController controller) {
+    return !_isDisposed &&
+        identical(_controller, controller) &&
+        controller.value.isInitialized;
+  }
+
+  Future<void> _handleLifecycleBackgroundTransition(
+    VideoPlayerController lifecycleController,
+  ) async {
+    if (_isHandlingLifecycleBackgroundTransition ||
+        !_isControllerActive(lifecycleController)) {
+      return;
+    }
+
+    _isHandlingLifecycleBackgroundTransition = true;
+    try {
+      if (_allowBackgroundContinuation && !lifecycleController.value.isPlaying) {
+        await lifecycleController.play();
+      }
+
+      if (!_isControllerActive(lifecycleController)) {
+        return;
+      }
+
+      await _refreshPipAutoEnterForCurrentState(lifecycleController);
+
+      if (_allowBackgroundContinuation &&
+          !_isAudioOnly &&
+          lifecycleController.value.isPlaying) {
+        unawaited(_nativePlaybackBridge.enterPipNow());
+      }
+
+      await _syncPlaybackRuntimeState(
+        isPlaying: lifecycleController.value.isPlaying,
+        force: true,
+      );
+
+      if (_allowBackgroundContinuation && !lifecycleController.value.isPlaying) {
+        await Future.delayed(_backgroundRecoveryDelay);
+
+        if (!_isControllerActive(lifecycleController) ||
+            !_allowBackgroundContinuation ||
+            lifecycleController.value.isPlaying) {
+          return;
+        }
+
+        await lifecycleController.play();
+        await _syncPlaybackRuntimeState(
+          isPlaying: lifecycleController.value.isPlaying,
+          force: true,
+        );
+
+        if (!_isAudioOnly && lifecycleController.value.isPlaying) {
+          unawaited(_nativePlaybackBridge.enterPipNow());
+        }
+      }
+    } catch (e) {
+      debugPrint('Background lifecycle handoff failed: $e');
+    } finally {
+      _isHandlingLifecycleBackgroundTransition = false;
+    }
+  }
+
+  Future<void> _handleLifecycleResumed(
+    VideoPlayerController lifecycleController,
+  ) async {
+    if (!_isControllerActive(lifecycleController)) {
+      return;
+    }
+
+    await _refreshPipAutoEnterForCurrentState(lifecycleController);
+    await _syncPlaybackRuntimeState(
+      isPlaying: lifecycleController.value.isPlaying,
+      force: true,
+    );
   }
 
   Future<void> _initializePlayer() async {
@@ -131,6 +220,11 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     }
 
     _hasAutoBackgroundHandoff = false;
+    _autoBackgroundHandoffInProgress = false;
+    _autoBackgroundAttemptCount = 0;
+    _autoBackgroundRetryTimer?.cancel();
+    _autoBackgroundRetryTimer = null;
+    _allowBackgroundContinuation = true;
     _didStopMediaSessionAfterCompletion = false;
 
     try {
@@ -153,6 +247,7 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
 
       await controller.setLooping(false);
       await controller.play();
+      _allowBackgroundContinuation = true;
 
       if (_isSessionStale(playbackSessionId)) {
         await controller.dispose();
@@ -192,38 +287,85 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
   }
 
   Future<void> _triggerAutoBackgroundHandoffIfNeeded() async {
+    if (_isDisposed ||
+        !widget.autoBackgroundStart ||
+        _hasAutoBackgroundHandoff ||
+        _autoBackgroundHandoffInProgress) {
+      return;
+    }
+
+    _autoBackgroundHandoffInProgress = true;
+    await Future.delayed(const Duration(milliseconds: 900));
+    try {
+      if (!mounted || _isDisposed || _hasAutoBackgroundHandoff) {
+        return;
+      }
+
+      final controller = _controller;
+      if (controller == null ||
+          !controller.value.isInitialized ||
+          !controller.value.isPlaying) {
+        _scheduleAutoBackgroundRetry();
+        return;
+      }
+
+      var pipReady = true;
+      if (!_isAudioOnly) {
+        try {
+          pipReady = await _nativePlaybackBridge.enterPipNow();
+        } catch (e) {
+          pipReady = false;
+          debugPrint('Auto PiP entry failed: $e');
+        }
+
+        if (pipReady) {
+          await Future.delayed(const Duration(milliseconds: 220));
+        }
+      }
+
+      if (!pipReady) {
+        _scheduleAutoBackgroundRetry();
+        return;
+      }
+
+      try {
+        const platform = MethodChannel('com.rajesh.mediatube/app');
+        final movedToBackground =
+            await platform.invokeMethod<bool>('moveToBackground') ?? false;
+        if (movedToBackground) {
+          _hasAutoBackgroundHandoff = true;
+          _autoBackgroundAttemptCount = 0;
+          _autoBackgroundRetryTimer?.cancel();
+          _autoBackgroundRetryTimer = null;
+        } else {
+          _scheduleAutoBackgroundRetry();
+        }
+      } catch (e) {
+        debugPrint('Auto background handoff failed: $e');
+        _scheduleAutoBackgroundRetry();
+      }
+    } finally {
+      _autoBackgroundHandoffInProgress = false;
+    }
+  }
+
+  void _scheduleAutoBackgroundRetry() {
     if (_isDisposed || !widget.autoBackgroundStart || _hasAutoBackgroundHandoff) {
       return;
     }
 
-    _hasAutoBackgroundHandoff = true;
-    await Future.delayed(const Duration(milliseconds: 900));
-    if (!mounted) {
+    if (_autoBackgroundAttemptCount >= _maxAutoBackgroundAttempts) {
       return;
     }
 
-    final controller = _controller;
-    if (controller == null ||
-        !controller.value.isInitialized ||
-        !controller.value.isPlaying) {
-      return;
-    }
-
-    if (!_isAudioOnly) {
-      try {
-        await _nativePlaybackBridge.enterPipNow();
-        await Future.delayed(const Duration(milliseconds: 220));
-      } catch (e) {
-        debugPrint('Auto PiP entry failed: $e');
+    _autoBackgroundAttemptCount++;
+    _autoBackgroundRetryTimer?.cancel();
+    _autoBackgroundRetryTimer = Timer(_autoBackgroundRetryDelay, () {
+      if (_isDisposed || !mounted) {
+        return;
       }
-    }
-
-    try {
-      const platform = MethodChannel('com.rajesh.mediatube/app');
-      await platform.invokeMethod('moveToBackground');
-    } catch (e) {
-      debugPrint('Auto background handoff failed: $e');
-    }
+      unawaited(_triggerAutoBackgroundHandoffIfNeeded());
+    });
   }
 
   void _onControllerTick() {
@@ -235,31 +377,27 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
       return;
     }
 
-    final isPlaying = controller.value.isPlaying;
+    final value = controller.value;
+    final isPlaying = value.isPlaying;
+
     if (isPlaying) {
       _didStopMediaSessionAfterCompletion = false;
     } else if (!_didStopMediaSessionAfterCompletion &&
-        controller.value.duration > Duration.zero &&
-        controller.value.position >= controller.value.duration) {
+        value.duration > Duration.zero &&
+        value.position >= value.duration) {
       _didStopMediaSessionAfterCompletion = true;
       unawaited(_nativePlaybackBridge.stopMediaSession());
     }
 
     final now = DateTime.now();
-    final shouldSyncNative =
-        _lastKnownIsPlaying != isPlaying ||
-        now.difference(_lastNativeRuntimeSyncAt) >=
-            const Duration(milliseconds: 900);
 
-    if (shouldSyncNative) {
+    if (_lastKnownIsPlaying != isPlaying ||
+        now.difference(_lastNativeRuntimeSyncAt) >= _runtimeSyncInterval) {
       unawaited(_syncPlaybackRuntimeState(isPlaying: isPlaying));
     }
 
-    final shouldRefreshUi =
-      now.difference(_lastUiRefreshAt) >= const Duration(milliseconds: 320) ||
-        controller.value.position >= controller.value.duration;
-
-    if (shouldRefreshUi) {
+    if (now.difference(_lastUiRefreshAt) >= _uiRefreshInterval ||
+        value.position >= value.duration) {
       _lastUiRefreshAt = now;
       setState(() {});
     }
@@ -269,7 +407,7 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     VideoPlayerController controller,
   ) async {
     if (_isAudioOnly) {
-      await _nativePlaybackBridge.configurePip(
+      await _configurePipIfNeeded(
         enabled: false,
         aspectWidth: 16,
         aspectHeight: 9,
@@ -283,11 +421,62 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
         : 16 / 9;
     final aspectWidth = (aspectRatio * 1000).round();
 
-    await _nativePlaybackBridge.configurePip(
+    await _configurePipIfNeeded(
       enabled: true,
       aspectWidth: aspectWidth <= 0 ? 16 : aspectWidth,
       aspectHeight: 1000,
       autoEnter: true,
+    );
+  }
+
+  Future<void> _configurePipIfNeeded({
+    required bool enabled,
+    required int aspectWidth,
+    required int aspectHeight,
+    required bool autoEnter,
+    bool force = false,
+  }) async {
+    final normalizedWidth = aspectWidth <= 0 ? 16 : aspectWidth;
+    final normalizedHeight = aspectHeight <= 0 ? 9 : aspectHeight;
+
+    if (!force &&
+        _lastConfiguredPipEnabled == enabled &&
+        _lastConfiguredPipAutoEnter == autoEnter &&
+        _lastConfiguredPipAspectWidth == normalizedWidth &&
+        _lastConfiguredPipAspectHeight == normalizedHeight) {
+      return;
+    }
+
+    _lastConfiguredPipEnabled = enabled;
+    _lastConfiguredPipAutoEnter = autoEnter;
+    _lastConfiguredPipAspectWidth = normalizedWidth;
+    _lastConfiguredPipAspectHeight = normalizedHeight;
+
+    await _nativePlaybackBridge.configurePip(
+      enabled: enabled,
+      aspectWidth: normalizedWidth,
+      aspectHeight: normalizedHeight,
+      autoEnter: autoEnter,
+    );
+  }
+
+  Future<void> _refreshPipAutoEnterForCurrentState(
+    VideoPlayerController controller,
+  ) async {
+    if (_isAudioOnly) {
+      return;
+    }
+
+    if (_allowBackgroundContinuation && controller.value.isPlaying) {
+      await _configurePictureInPicture(controller);
+      return;
+    }
+
+    await _configurePipIfNeeded(
+      enabled: true,
+      aspectWidth: 16,
+      aspectHeight: 9,
+      autoEnter: false,
     );
   }
 
@@ -312,8 +501,7 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     final now = DateTime.now();
     final playbackStateChanged = _lastKnownIsPlaying != isPlaying;
     final isProgressSyncDue =
-        now.difference(_lastNativeRuntimeSyncAt) >=
-        const Duration(milliseconds: 900);
+      now.difference(_lastNativeRuntimeSyncAt) >= _runtimeSyncInterval;
 
     if (!force && !playbackStateChanged && !isProgressSyncDue) {
       return;
@@ -352,19 +540,24 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
 
     switch (event.action) {
       case NativePlaybackControlAction.play:
+        _allowBackgroundContinuation = true;
         await controller.play();
         break;
       case NativePlaybackControlAction.pause:
+        _allowBackgroundContinuation = false;
         await controller.pause();
         break;
       case NativePlaybackControlAction.toggle:
         if (controller.value.isPlaying) {
+          _allowBackgroundContinuation = false;
           await controller.pause();
         } else {
+          _allowBackgroundContinuation = true;
           await controller.play();
         }
         break;
       case NativePlaybackControlAction.stop:
+        _allowBackgroundContinuation = false;
         await controller.pause();
         await controller.seekTo(Duration.zero);
         _didStopMediaSessionAfterCompletion = true;
@@ -384,6 +577,8 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
         }
         break;
     }
+
+    await _refreshPipAutoEnterForCurrentState(controller);
 
     await _syncPlaybackRuntimeState(
       isPlaying: controller.value.isPlaying,
@@ -437,10 +632,28 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     }
 
     if (controller.value.isPlaying) {
+      _allowBackgroundContinuation = false;
       await controller.pause();
+      // Disable PiP auto-enter when paused so minimizing doesn't
+      // enter PiP for a paused video.
+      if (!_isAudioOnly) {
+        unawaited(
+          _configurePipIfNeeded(
+            enabled: true,
+            aspectWidth: 16,
+            aspectHeight: 9,
+            autoEnter: false,
+          ),
+        );
+      }
     } else {
       _didStopMediaSessionAfterCompletion = false;
+      _allowBackgroundContinuation = true;
       await controller.play();
+      // Re-enable PiP auto-enter when playing resumes.
+      if (!_isAudioOnly) {
+        unawaited(_configurePictureInPicture(controller));
+      }
     }
 
     await _syncPlaybackRuntimeState(
@@ -475,6 +688,12 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     _lastUiRefreshAt = DateTime.fromMillisecondsSinceEpoch(0);
     _lastNativeRuntimeSyncAt = DateTime.fromMillisecondsSinceEpoch(0);
     _lastKnownIsPlaying = null;
+    _isHandlingLifecycleBackgroundTransition = false;
+    _lastLifecycleBackgroundHandledAt = DateTime.fromMillisecondsSinceEpoch(0);
+    _lastConfiguredPipEnabled = null;
+    _lastConfiguredPipAutoEnter = null;
+    _lastConfiguredPipAspectWidth = null;
+    _lastConfiguredPipAspectHeight = null;
   }
 
   @override

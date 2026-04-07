@@ -20,6 +20,10 @@ class DownloadService {
   final Map<String, bool> _pausedDownloads = {}; // Track paused state
   final Map<String, DetectedMedia> _downloadMedia =
       {}; // Store media for resume
+  String? _cachedUserAgent;
+
+  static const String _fallbackUserAgent =
+      'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
 
   // Backend server settings
   bool? _backendAvailable; // Cache backend availability
@@ -35,15 +39,48 @@ class DownloadService {
 
   // Headers required for YouTube downloads
   static const Map<String, String> defaultHeaders = {
-    // Keep the Pixel 7 User-Agent
-    'User-Agent':
-        'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+    // Fallback headers (used when runtime WebView User-Agent cannot be fetched)
+    'User-Agent': _fallbackUserAgent,
     'Accept': '*/*',
     'Connection': 'keep-alive',
     // UPDATED: Use Mobile domain to match User-Agent
     'Referer': 'https://m.youtube.com/',
     'Origin': 'https://m.youtube.com',
   };
+
+  Future<String> _getRuntimeUserAgent() async {
+    final cached = _cachedUserAgent;
+    if (cached != null && cached.isNotEmpty) {
+      return cached;
+    }
+
+    try {
+      final resolved = (await InAppWebViewController.getDefaultUserAgent()).trim();
+      if (resolved.isNotEmpty) {
+        _cachedUserAgent = resolved;
+        return resolved;
+      }
+    } catch (e) {
+      debugPrint('⚠️ Failed to resolve WebView User-Agent: $e');
+    }
+
+    _cachedUserAgent = _fallbackUserAgent;
+    return _fallbackUserAgent;
+  }
+
+  Future<Map<String, dynamic>> _buildBaseHeaders(String refererBase) async {
+    final refererUri = Uri.parse(refererBase);
+    final userAgent = await _getRuntimeUserAgent();
+
+    return <String, dynamic>{
+      'User-Agent': userAgent,
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Connection': 'keep-alive',
+      'Referer': refererBase,
+      'Origin': '${refererUri.scheme}://${refererUri.host}',
+    };
+  }
 
   Future<String> get downloadPath async {
     if (_downloadPath != null) return _downloadPath!;
@@ -543,7 +580,7 @@ class DownloadService {
   Future<Map<String, dynamic>> _buildRequestHeaders(String url) async {
     final uri = Uri.tryParse(url);
     if (uri == null) {
-      return Map<String, dynamic>.from(defaultHeaders);
+      return _buildBaseHeaders('https://m.youtube.com/');
     }
 
     final host = uri.host.toLowerCase();
@@ -553,7 +590,7 @@ class DownloadService {
         host.contains('youtu.be');
 
     if (isYouTube) {
-      return Map<String, dynamic>.from(defaultHeaders);
+      return _buildBaseHeaders('https://m.youtube.com/');
     }
 
     String refererBase;
@@ -574,17 +611,7 @@ class DownloadService {
       refererBase = '${uri.scheme}://${uri.host}/';
     }
 
-    final refererUri = Uri.parse(refererBase);
-
-    final headers = <String, dynamic>{
-      'User-Agent':
-          'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-      'Accept': '*/*',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Connection': 'keep-alive',
-      'Referer': refererBase,
-      'Origin': '${refererUri.scheme}://${refererUri.host}',
-    };
+    final headers = await _buildBaseHeaders(refererBase);
 
     try {
       final cookieFragments = <String>[];
@@ -659,6 +686,44 @@ class DownloadService {
     return _deleteFile(filePath);
   }
 
+  /// Delete temporary/partial artifacts for a cancelled task.
+  Future<void> deletePartialFilesForTask(DownloadTask task) async {
+    final savePath = task.savePath;
+    if (savePath.isEmpty) {
+      return;
+    }
+
+    final directory = p.dirname(savePath);
+    final baseName = p.basenameWithoutExtension(savePath);
+
+    final candidateFiles = <String>{
+      savePath,
+      '$savePath.part',
+      p.join(directory, '${baseName}_video.mp4'),
+      p.join(directory, '${baseName}_video.webm'),
+      p.join(directory, '${baseName}_audio.m4a'),
+      p.join(directory, '${baseName}_audio.webm'),
+    };
+
+    if (task.tempPath != null && task.tempPath!.isNotEmpty) {
+      candidateFiles.add(task.tempPath!);
+    }
+
+    for (final filePath in candidateFiles) {
+      await _deleteFile(filePath);
+    }
+
+    try {
+      final pathHash = savePath.hashCode.toRadixString(16);
+      final chunkDir = Directory(p.join(directory, '.temp_chunks_$pathHash'));
+      if (await chunkDir.exists()) {
+        await chunkDir.delete(recursive: true);
+      }
+    } catch (e) {
+      debugPrint('Warning: Failed to clean cancelled download temp folder: $e');
+    }
+  }
+
   Future<bool> _deleteFile(String path) async {
     try {
       final file = File(path);
@@ -673,6 +738,31 @@ class DownloadService {
   }
 
   String _sanitizeFileName(String name) {
+    const windowsReservedNames = <String>{
+      'CON',
+      'PRN',
+      'AUX',
+      'NUL',
+      'COM1',
+      'COM2',
+      'COM3',
+      'COM4',
+      'COM5',
+      'COM6',
+      'COM7',
+      'COM8',
+      'COM9',
+      'LPT1',
+      'LPT2',
+      'LPT3',
+      'LPT4',
+      'LPT5',
+      'LPT6',
+      'LPT7',
+      'LPT8',
+      'LPT9',
+    };
+
     // Remove invalid characters for file names on Windows/Android
     // Including: < > : " / \ | ? * and control characters
     var sanitized = name
@@ -686,6 +776,12 @@ class DownloadService {
           RegExp(r'^_+|_+$'),
           '',
         ); // Trim leading/trailing underscores
+
+    // Windows blocks trailing dots/spaces and reserved device names.
+    sanitized = sanitized.replaceAll(RegExp(r'[\. ]+$'), '');
+    if (windowsReservedNames.contains(sanitized.toUpperCase())) {
+      sanitized = '${sanitized}_file';
+    }
 
     // Truncate to max 100 characters
     if (sanitized.length > 100) {

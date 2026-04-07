@@ -394,7 +394,8 @@ class YouTubeService {
     }
 
     // Get fresh URL from youtube_explode
-    _reinitializeClient();
+    // Reuse existing client connection pool — _reinitializeClient() is
+    // only called automatically on retryable errors via _waitAndReinit.
     _lastManifestFetch = DateTime.now();
 
     final manifest = await yt.videos.streamsClient
@@ -473,14 +474,19 @@ class YouTubeService {
       ...manifest.audioOnly,
     ];
 
+    // Build an itag -> StreamInfo map for O(1) lookup.
+    final itagMap = <String, StreamInfo>{};
+    for (final s in allStreams) {
+      final itag = _extractItag(s.url.toString());
+      if (itag != null) {
+        itagMap[itag] = s;
+      }
+    }
+
     // Try match by itag (most reliable)
     final targetItag = _extractItag(streamUrl);
-    if (targetItag != null) {
-      for (final s in allStreams) {
-        if (_extractItag(s.url.toString()) == targetItag) {
-          return s;
-        }
-      }
+    if (targetItag != null && itagMap.containsKey(targetItag)) {
+      return itagMap[targetItag]!;
     }
 
     // Fallback to index

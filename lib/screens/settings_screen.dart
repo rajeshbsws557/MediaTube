@@ -98,6 +98,69 @@ class SettingsScreen extends StatelessWidget {
                     ),
                   ),
                 ),
+                const SizedBox(height: 12),
+                Card(
+                  elevation: 0,
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.surfaceContainerHighest.withAlpha(50),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Concurrent Downloads',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Choose how many downloads can run at the same time.',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Slider(
+                          value: settingsProvider.maxConcurrentDownloads.toDouble(),
+                          min: SettingsService.minConcurrentDownloads.toDouble(),
+                          max: SettingsService.maxConcurrentDownloads.toDouble(),
+                          divisions:
+                              SettingsService.maxConcurrentDownloads -
+                              SettingsService.minConcurrentDownloads,
+                          label: '${settingsProvider.maxConcurrentDownloads}',
+                          onChanged: (value) {
+                            final nextValue = value.round();
+                            if (nextValue !=
+                                settingsProvider.maxConcurrentDownloads) {
+                              settingsProvider.setMaxConcurrentDownloads(
+                                nextValue,
+                              );
+                            }
+                          },
+                        ),
+                        Align(
+                          alignment: Alignment.centerRight,
+                          child: Text(
+                            'Current: ${settingsProvider.maxConcurrentDownloads}',
+                            style: TextStyle(
+                              color: Theme.of(
+                                context,
+                              ).colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
                 const SizedBox(height: 24),
                 const Padding(
                   padding: EdgeInsets.only(bottom: 8.0, left: 16),

@@ -77,6 +77,7 @@ class _BrowserScreenState extends State<BrowserScreen>
   bool _isOmniMenuExpanded = false;
   bool _isStreamPulseActive = false;
   bool _keepAlivePlaybackScriptInjected = false;
+  bool _playbackIntentHooksInjected = false;
 
   Offset _omniFabNormalized = const Offset(0.84, 0.78);
   Offset _streamFabNormalized = const Offset(0.88, 0.60);
@@ -86,12 +87,19 @@ class _BrowserScreenState extends State<BrowserScreen>
   bool _backgroundPlaybackAutomationInProgress = false;
   int _backgroundPlaybackAutomationEpoch = 0;
   bool _backgroundPlaybackTickInProgress = false;
+  bool _isCapturingPlaybackIntentForBackground = false;
+  DateTime _lastBackgroundLifecycleCaptureAt =
+      DateTime.fromMillisecondsSinceEpoch(0);
   int _consecutiveNoPlaybackDetections = 0;
   String _lastPlaybackForegroundTitle = '';
   String _lastKnownPlaybackTitle = 'MediaTube';
+  bool _wasVideoPlayingBeforeBackground = false;
 
-  static const Duration _backgroundPlaybackTickInterval = Duration(seconds: 4);
+  static const Duration _backgroundPlaybackTickInterval = Duration(seconds: 6);
+  static const Duration _backgroundLifecycleDebounce = Duration(milliseconds: 180);
   static const int _maxNoPlaybackDetectionsBeforeStop = 3;
+
+  SharedPreferences? _cachedPrefs;
 
   final BackgroundDownloadService _backgroundService =
       BackgroundDownloadService();
@@ -250,9 +258,12 @@ class _BrowserScreenState extends State<BrowserScreen>
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden) {
-      unawaited(
-        _activateBackgroundPlaybackAutomation(usePlaybackDelay: true),
-      );
+      final now = DateTime.now();
+      if (now.difference(_lastBackgroundLifecycleCaptureAt) >=
+          _backgroundLifecycleDebounce) {
+        _lastBackgroundLifecycleCaptureAt = now;
+        unawaited(_capturePlaybackIntentAndActivateBackground());
+      }
       return;
     }
 
@@ -260,10 +271,14 @@ class _BrowserScreenState extends State<BrowserScreen>
       final hadBackgroundLoop =
           _backgroundPlaybackTimer != null || _backgroundPlaybackAutomationInProgress;
       _stopBackgroundPlaybackAutomationLoop();
+      _isCapturingPlaybackIntentForBackground = false;
       unawaited(_stopPlaybackForegroundProtection());
-      if (hadBackgroundLoop) {
+      if (hadBackgroundLoop && _wasVideoPlayingBeforeBackground) {
         unawaited(_forceCurrentVideoPlayback(delayMs: 220));
       }
+      _wasVideoPlayingBeforeBackground = false;
+      // Clear transient markers so each background transition follows fresh user intent.
+      unawaited(_clearBackgroundPlaybackMarkers());
       _checkClipboardForMedia();
       return;
     }
@@ -272,6 +287,96 @@ class _BrowserScreenState extends State<BrowserScreen>
       _stopBackgroundPlaybackAutomationLoop();
       unawaited(_stopPlaybackForegroundProtection());
     }
+  }
+
+  /// Captures WebView playback intent and only enables background automation
+  /// when user intent indicates playback should continue.
+  Future<void> _capturePlaybackIntentAndActivateBackground() async {
+    if (_isCapturingPlaybackIntentForBackground) {
+      return;
+    }
+
+    _isCapturingPlaybackIntentForBackground = true;
+
+    final controller = _webViewController;
+    if (controller == null) {
+      _wasVideoPlayingBeforeBackground = false;
+      _isCapturingPlaybackIntentForBackground = false;
+      return;
+    }
+
+    try {
+      await _injectPlaybackIntentHooksIfNeeded();
+      final result = await controller.evaluateJavascript(
+        source: '''
+          (() => {
+            const videos = Array.from(document.querySelectorAll('video'));
+            let shouldContinue = false;
+
+            videos.forEach((video) => {
+              if (video.ended) {
+                video.dataset.mtUserIntent = 'pause';
+                delete video.dataset.mtBackgroundPlay;
+                return;
+              }
+
+              const isActivelyPlaying = !video.paused && video.readyState > 2;
+              if (isActivelyPlaying) {
+                video.dataset.mtUserIntent = 'play';
+                video.dataset.mtBackgroundPlay = 'true';
+                shouldContinue = true;
+                return;
+              }
+
+              if (video.dataset.mtUserIntent === 'play') {
+                shouldContinue = true;
+              }
+            });
+
+            return shouldContinue;
+          })();
+        ''',
+      );
+
+      _wasVideoPlayingBeforeBackground = result == true || result?.toString() == 'true';
+    } catch (e) {
+      // If intent cannot be resolved, avoid accidental autoplay on background.
+      _wasVideoPlayingBeforeBackground = false;
+      debugPrint('Failed to capture playback intent: $e');
+    }
+
+    if (_wasVideoPlayingBeforeBackground) {
+      unawaited(
+        _activateBackgroundPlaybackAutomation(usePlaybackDelay: true),
+      );
+    } else {
+      // Video was paused by user — don't start background playback,
+      // but do stop any existing foreground protection.
+      _stopBackgroundPlaybackAutomationLoop();
+      unawaited(_stopPlaybackForegroundProtection());
+    }
+
+    _isCapturingPlaybackIntentForBackground = false;
+  }
+
+  /// Clears transient background markers from videos so the next lifecycle
+  /// transition depends on fresh user intent.
+  Future<void> _clearBackgroundPlaybackMarkers() async {
+    final controller = _webViewController;
+    if (controller == null) return;
+
+    try {
+      await controller.evaluateJavascript(
+        source: '''
+          (() => {
+            document.querySelectorAll('video').forEach((v) => {
+              delete v.dataset.mtBackgroundPlay;
+              delete v.dataset.mtUserIntent;
+            });
+          })();
+        ''',
+      );
+    } catch (_) {}
   }
 
   Future<void> _activateBackgroundPlaybackAutomation({
@@ -290,6 +395,7 @@ class _BrowserScreenState extends State<BrowserScreen>
       _lastKnownPlaybackTitle = bootstrapTitle;
       await _ensurePlaybackForegroundProtection(title: bootstrapTitle);
 
+      await _injectPlaybackIntentHooksIfNeeded();
       await _injectPlaybackKeepAliveScript();
       if (!mounted || epoch != _backgroundPlaybackAutomationEpoch) {
         return;
@@ -340,6 +446,7 @@ class _BrowserScreenState extends State<BrowserScreen>
     _backgroundPlaybackTimer = null;
     _backgroundPlaybackAutomationInProgress = false;
     _backgroundPlaybackTickInProgress = false;
+    _isCapturingPlaybackIntentForBackground = false;
     _consecutiveNoPlaybackDetections = 0;
   }
 
@@ -451,6 +558,112 @@ class _BrowserScreenState extends State<BrowserScreen>
     }
   }
 
+  Future<void> _injectPlaybackIntentHooksIfNeeded() async {
+    final controller = _webViewController;
+    if (controller == null || _playbackIntentHooksInjected) {
+      return;
+    }
+
+    try {
+      await controller.evaluateJavascript(
+        source: '''
+          (() => {
+            if (window.__mediaTubeIntentHooked) {
+              return true;
+            }
+
+            window.__mediaTubeIntentHooked = true;
+
+            const markIntentFromState = (video) => {
+              try {
+                if (video.ended) {
+                  video.dataset.mtUserIntent = 'pause';
+                  delete video.dataset.mtBackgroundPlay;
+                  return;
+                }
+
+                if (!video.paused) {
+                  video.dataset.mtUserIntent = 'play';
+                  video.dataset.mtBackgroundPlay = 'true';
+                  return;
+                }
+
+                if (video.dataset.mtUserIntent !== 'play') {
+                  video.dataset.mtUserIntent = 'pause';
+                }
+              } catch (_) {}
+            };
+
+            const bindVideo = (video) => {
+              if (!video || video.__mediaTubeIntentBound) {
+                return;
+              }
+
+              video.__mediaTubeIntentBound = true;
+              markIntentFromState(video);
+
+              const markPlay = () => {
+                try {
+                  video.dataset.mtUserIntent = 'play';
+                  video.dataset.mtBackgroundPlay = 'true';
+                } catch (_) {}
+              };
+
+              const markPause = () => {
+                try {
+                  if (!video.ended) {
+                    video.dataset.mtUserIntent = 'pause';
+                    delete video.dataset.mtBackgroundPlay;
+                  }
+                } catch (_) {}
+              };
+
+              const markEnded = () => {
+                try {
+                  video.dataset.mtUserIntent = 'pause';
+                  delete video.dataset.mtBackgroundPlay;
+                } catch (_) {}
+              };
+
+              video.addEventListener('play', markPlay, { passive: true });
+              video.addEventListener('playing', markPlay, { passive: true });
+              video.addEventListener('pause', markPause, { passive: true });
+              video.addEventListener('ended', markEnded, { passive: true });
+            };
+
+            const bindAllVideos = () => {
+              document.querySelectorAll('video').forEach((video) => {
+                bindVideo(video);
+                markIntentFromState(video);
+              });
+            };
+
+            bindAllVideos();
+
+            if (!window.__mediaTubeIntentObserver) {
+              const observer = new MutationObserver(() => {
+                bindAllVideos();
+              });
+
+              observer.observe(document.documentElement || document.body, {
+                childList: true,
+                subtree: true,
+              });
+
+              window.__mediaTubeIntentObserver = observer;
+            }
+
+            return true;
+          })();
+        ''',
+      );
+
+      _playbackIntentHooksInjected = true;
+    } catch (e) {
+      debugPrint('Playback intent hook injection failed: $e');
+    }
+  }
+
   Future<void> _injectPlaybackKeepAliveScript() async {
     final controller = _webViewController;
     if (controller == null || _keepAlivePlaybackScriptInjected) {
@@ -472,6 +685,24 @@ class _BrowserScreenState extends State<BrowserScreen>
               videos.forEach((video) => {
                 try {
                   if (video.ended) {
+                    video.dataset.mtUserIntent = 'pause';
+                    delete video.dataset.mtBackgroundPlay;
+                    return;
+                  }
+
+                  if (video.dataset.mtUserIntent === 'pause') {
+                    delete video.dataset.mtBackgroundPlay;
+                    return;
+                  }
+
+                  if (!video.paused) {
+                    video.dataset.mtUserIntent = 'play';
+                    video.dataset.mtBackgroundPlay = 'true';
+                  }
+
+                  // Only resume videos that were marked as playing by MediaTube
+                  // before the app went to background.
+                  if (video.dataset.mtBackgroundPlay !== 'true') {
                     return;
                   }
 
@@ -511,7 +742,6 @@ class _BrowserScreenState extends State<BrowserScreen>
               }
             }, 3200);
 
-            keepPlaying();
             return true;
           })();
         ''',
@@ -547,6 +777,25 @@ class _BrowserScreenState extends State<BrowserScreen>
               videos.forEach((video) => {
                 try {
                   if (video.ended) {
+                    video.dataset.mtUserIntent = 'pause';
+                    delete video.dataset.mtBackgroundPlay;
+                    return;
+                  }
+
+                  if (video.dataset.mtUserIntent === 'pause') {
+                    delete video.dataset.mtBackgroundPlay;
+                    return;
+                  }
+
+                  // Mark currently playing videos for background continuation.
+                  // Only videos that were playing (not paused by user) get marked.
+                  if (!video.paused) {
+                    video.dataset.mtUserIntent = 'play';
+                    video.dataset.mtBackgroundPlay = 'true';
+                  }
+
+                  // Only resume videos marked for background play.
+                  if (video.dataset.mtBackgroundPlay !== 'true') {
                     return;
                   }
 
@@ -1132,7 +1381,8 @@ class _BrowserScreenState extends State<BrowserScreen>
   }
 
   Future<void> _loadFloatingButtonPositions() async {
-    final prefs = await SharedPreferences.getInstance();
+    _cachedPrefs ??= await SharedPreferences.getInstance();
+    final prefs = _cachedPrefs!;
     final omniX = prefs.getDouble(_omniFabXPrefKey);
     final omniY = prefs.getDouble(_omniFabYPrefKey);
     final streamX = prefs.getDouble(_streamFabXPrefKey);
@@ -1167,7 +1417,8 @@ class _BrowserScreenState extends State<BrowserScreen>
   }
 
   Future<void> _saveFloatingButtonPositions() async {
-    final prefs = await SharedPreferences.getInstance();
+    _cachedPrefs ??= await SharedPreferences.getInstance();
+    final prefs = _cachedPrefs!;
     await prefs.setDouble(_omniFabXPrefKey, _omniFabNormalized.dx);
     await prefs.setDouble(_omniFabYPrefKey, _omniFabNormalized.dy);
     await prefs.setDouble(_streamFabXPrefKey, _streamFabNormalized.dx);
@@ -1794,6 +2045,7 @@ class _BrowserScreenState extends State<BrowserScreen>
               final provider = context.read<BrowserProvider>();
               provider.setLoading(true);
               _keepAlivePlaybackScriptInjected = false;
+              _playbackIntentHooksInjected = false;
               unawaited(_syncRequestInterceptionMode(provider));
               _urlController.text = url?.toString() ?? '';
             },
@@ -1895,6 +2147,7 @@ class _BrowserScreenState extends State<BrowserScreen>
               );
 
               if (provider.isYouTubePage) {
+                unawaited(_injectPlaybackIntentHooksIfNeeded());
                 unawaited(_injectPlaybackKeepAliveScript());
               }
 

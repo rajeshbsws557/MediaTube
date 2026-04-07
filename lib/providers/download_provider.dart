@@ -39,11 +39,12 @@ class DownloadProvider extends ChangeNotifier {
   // Speed tracking for notifications
   final Map<String, int> _lastBytesValues = {};
   final Map<String, DateTime> _lastTimeValues = {};
+  final Map<String, int> _smoothedSpeedValues = {};
   final Map<String, DateTime> _lastNotificationTimes = {};
   final Map<String, DateTime> _lastHistorySnapshotTimes = {};
 
-  // Limit concurrent downloads - 2 max to prevent bandwidth/thread saturation on mobile
-  static const int _maxConcurrentDownloads = 2;
+  // Limit concurrent downloads to prevent bandwidth/thread saturation on mobile.
+  int _maxConcurrentDownloads = SettingsService.defaultMaxConcurrentDownloads;
   static const String _interruptedStatusMessage = 'Interrupted - app closed';
   static const String _recoveredStatusMessage = 'Recovered after app restart';
 
@@ -73,10 +74,54 @@ class DownloadProvider extends ChangeNotifier {
 
   bool get hasActiveDownloads => activeDownloads.isNotEmpty;
   bool get hasPausedDownloads => pausedDownloads.isNotEmpty;
+  int get maxConcurrentDownloads => _maxConcurrentDownloads;
 
   /// Get progress notifier for a specific download (for granular UI updates)
   ValueNotifier<double>? getProgressNotifier(String taskId) =>
       _progressNotifiers[taskId];
+
+  Future<void> _fillAvailableDownloadSlots() async {
+    while (true) {
+      final activeCount = _downloads
+          .where(
+            (d) =>
+                d.status == DownloadStatus.downloading ||
+                d.status == DownloadStatus.merging,
+          )
+          .length;
+
+      if (activeCount >= _maxConcurrentDownloads) {
+        return;
+      }
+
+      final hasPending = _downloads.any((d) => d.status == DownloadStatus.pending);
+      if (!hasPending) {
+        return;
+      }
+
+      await _startNextQueuedDownload();
+      await Future<void>.delayed(Duration.zero);
+    }
+  }
+
+  void setMaxConcurrentDownloads(int value) {
+    final normalized = value
+        .clamp(
+          SettingsService.minConcurrentDownloads,
+          SettingsService.maxConcurrentDownloads,
+        )
+        .toInt();
+    if (_maxConcurrentDownloads == normalized) {
+      return;
+    }
+
+    final previous = _maxConcurrentDownloads;
+    _maxConcurrentDownloads = normalized;
+
+    if (_maxConcurrentDownloads > previous) {
+      unawaited(_fillAvailableDownloadSlots());
+    }
+  }
 
   /// Heavily throttled notify - batches updates to minimize UI rebuilds
   void _throttledNotify() {
@@ -465,6 +510,48 @@ class DownloadProvider extends ChangeNotifier {
     }
   }
 
+  int? _recordSpeedSample(DownloadTask updatedTask, DateTime now) {
+    final taskId = updatedTask.id;
+    final previousBytes = _lastBytesValues[taskId];
+    final previousTime = _lastTimeValues[taskId];
+
+    _lastBytesValues[taskId] = updatedTask.downloadedBytes;
+    _lastTimeValues[taskId] = now;
+
+    if (previousBytes == null || previousTime == null) {
+      return _smoothedSpeedValues[taskId];
+    }
+
+    final elapsedMs = now.difference(previousTime).inMilliseconds;
+    final deltaBytes = updatedTask.downloadedBytes - previousBytes;
+    if (elapsedMs <= 0 || deltaBytes <= 0) {
+      return _smoothedSpeedValues[taskId];
+    }
+
+    final instantSpeed = (deltaBytes * 1000) ~/ elapsedMs;
+    final previousSmoothed = _smoothedSpeedValues[taskId];
+    final smoothed = previousSmoothed == null
+        ? instantSpeed
+        : ((previousSmoothed * 3) + instantSpeed) ~/ 4;
+
+    _smoothedSpeedValues[taskId] = smoothed;
+    return smoothed;
+  }
+
+  void _clearTaskRuntimeTracking(String taskId, {bool disposeNotifier = false}) {
+    _lastProgressValues.remove(taskId);
+    _lastBytesValues.remove(taskId);
+    _lastTimeValues.remove(taskId);
+    _smoothedSpeedValues.remove(taskId);
+    _lastNotificationTimes.remove(taskId);
+    _lastHistorySnapshotTimes.remove(taskId);
+
+    if (disposeNotifier) {
+      _progressNotifiers[taskId]?.dispose();
+      _progressNotifiers.remove(taskId);
+    }
+  }
+
   /// Update progress - optimized for smooth UI and proper notification updates
   void _updateTaskThrottled(DownloadTask updatedTask, int notificationId) {
     final index = _downloads.indexWhere((d) => d.id == updatedTask.id);
@@ -472,13 +559,15 @@ class DownloadProvider extends ChangeNotifier {
       // Always update internal state immediately
       _downloads[index] = updatedTask;
 
+      final now = DateTime.now();
+      final speedBytesPerSec = _recordSpeedSample(updatedTask, now);
+
       // Update per-download progress notifier (for granular UI updates)
       _progressNotifiers[updatedTask.id]?.value = updatedTask.progress;
 
       if (updatedTask.status == DownloadStatus.downloading ||
           updatedTask.status == DownloadStatus.merging ||
           updatedTask.status == DownloadStatus.pending) {
-        final now = DateTime.now();
         final lastSnapshotAt = _lastHistorySnapshotTimes[updatedTask.id];
         if (lastSnapshotAt == null ||
             now.difference(lastSnapshotAt) >= const Duration(seconds: 5)) {
@@ -491,7 +580,6 @@ class DownloadProvider extends ChangeNotifier {
       final lastProgress = _lastProgressValues[updatedTask.id] ?? 0.0;
       final progressDiff = (updatedTask.progress - lastProgress).abs();
 
-      final now = DateTime.now();
       final lastNotificationTime = _lastNotificationTimes[updatedTask.id];
       final timeSinceLastNotification = lastNotificationTime == null
           ? 1000
@@ -503,22 +591,6 @@ class DownloadProvider extends ChangeNotifier {
           updatedTask.progress >= 1.0) {
         _lastProgressValues[updatedTask.id] = updatedTask.progress;
         _lastNotificationTimes[updatedTask.id] = now;
-
-        // Calculate download speed
-        int? speedBytesPerSec;
-        final lastBytes = _lastBytesValues[updatedTask.id] ?? 0;
-        final lastTime = _lastTimeValues[updatedTask.id];
-
-        if (lastTime != null && updatedTask.downloadedBytes > lastBytes) {
-          final elapsedMs = now.difference(lastTime).inMilliseconds;
-          if (elapsedMs > 0) {
-            speedBytesPerSec =
-                ((updatedTask.downloadedBytes - lastBytes) * 1000 ~/ elapsedMs);
-          }
-        }
-
-        _lastBytesValues[updatedTask.id] = updatedTask.downloadedBytes;
-        _lastTimeValues[updatedTask.id] = now;
 
         _backgroundService.updateProgressDetailed(
           title: updatedTask.fileName,
@@ -542,8 +614,7 @@ class DownloadProvider extends ChangeNotifier {
     final index = _downloads.indexWhere((d) => d.id == updatedTask.id);
     if (index != -1) {
       _downloads[index] = updatedTask;
-      _lastProgressValues.remove(updatedTask.id); // Clean up
-      _lastHistorySnapshotTimes.remove(updatedTask.id);
+      _clearTaskRuntimeTracking(updatedTask.id);
 
       // Save to history when completed or failed
       if (updatedTask.status == DownloadStatus.completed ||
@@ -711,10 +782,7 @@ class DownloadProvider extends ChangeNotifier {
     // Remove old task and start fresh
     _downloads.removeAt(index);
     _mediaMap.remove(taskId);
-    _lastProgressValues.remove(taskId);
-    _lastHistorySnapshotTimes.remove(taskId);
-    _progressNotifiers[taskId]?.dispose();
-    _progressNotifiers.remove(taskId);
+    _clearTaskRuntimeTracking(taskId, disposeNotifier: true);
     unawaited(_historyService.removeFromHistory(taskId));
     unawaited(_historyService.removeMediaForTask(taskId));
     _immediateNotify();
@@ -727,14 +795,13 @@ class DownloadProvider extends ChangeNotifier {
     _downloadService.cancelDownload(taskId);
     final index = _downloads.indexWhere((d) => d.id == taskId);
     if (index != -1) {
-      _downloads[index].status = DownloadStatus.cancelled;
-      _downloads[index].statusMessage = 'Cancelled';
-      unawaited(_saveToHistory(_downloads[index]));
+      final task = _downloads[index];
+      unawaited(_downloadService.deletePartialFilesForTask(task));
+      task.status = DownloadStatus.cancelled;
+      task.statusMessage = 'Cancelled';
+      unawaited(_saveToHistory(task));
       _mediaMap.remove(taskId);
-      _lastProgressValues.remove(taskId);
-      _lastHistorySnapshotTimes.remove(taskId);
-      _progressNotifiers[taskId]?.dispose();
-      _progressNotifiers.remove(taskId);
+      _clearTaskRuntimeTracking(taskId, disposeNotifier: true);
       unawaited(_historyService.removeMediaForTask(taskId));
       _immediateNotify();
     }
@@ -744,10 +811,7 @@ class DownloadProvider extends ChangeNotifier {
   Future<void> removeDownload(String taskId) async {
     _downloads.removeWhere((d) => d.id == taskId);
     _mediaMap.remove(taskId);
-    _lastProgressValues.remove(taskId);
-    _lastHistorySnapshotTimes.remove(taskId);
-    _progressNotifiers[taskId]?.dispose();
-    _progressNotifiers.remove(taskId);
+    _clearTaskRuntimeTracking(taskId, disposeNotifier: true);
 
     // Also remove from persisted history to prevent orphaned entries
     await _historyService.removeFromHistory(taskId);
@@ -769,8 +833,7 @@ class DownloadProvider extends ChangeNotifier {
       }
       _downloads.removeAt(index);
       _mediaMap.remove(taskId);
-      _lastProgressValues.remove(taskId);
-      _lastHistorySnapshotTimes.remove(taskId);
+      _clearTaskRuntimeTracking(taskId, disposeNotifier: true);
     }
 
     // Also remove from persisted history
@@ -807,8 +870,7 @@ class DownloadProvider extends ChangeNotifier {
     // Remove from current downloads if present
     _downloads.removeWhere((d) => d.id == taskId);
     _mediaMap.remove(taskId);
-    _lastProgressValues.remove(taskId);
-    _lastHistorySnapshotTimes.remove(taskId);
+    _clearTaskRuntimeTracking(taskId, disposeNotifier: true);
 
     // Remove from persisted history
     await _historyService.removeFromHistory(taskId);
@@ -831,8 +893,7 @@ class DownloadProvider extends ChangeNotifier {
 
     for (final id in toRemove) {
       _mediaMap.remove(id);
-      _lastProgressValues.remove(id);
-      _lastHistorySnapshotTimes.remove(id);
+      _clearTaskRuntimeTracking(id, disposeNotifier: true);
       unawaited(_historyService.removeMediaForTask(id));
     }
 
@@ -858,10 +919,10 @@ class DownloadProvider extends ChangeNotifier {
   void cancelAllDownloads() {
     _downloadService.cancelAllDownloads();
     for (final download in activeDownloads) {
+      unawaited(_downloadService.deletePartialFilesForTask(download));
       download.status = DownloadStatus.cancelled;
       download.statusMessage = 'Cancelled';
-      _lastProgressValues.remove(download.id);
-      _lastHistorySnapshotTimes.remove(download.id);
+      _clearTaskRuntimeTracking(download.id, disposeNotifier: true);
       unawaited(_saveToHistory(download, refreshHistory: false));
       unawaited(_historyService.removeMediaForTask(download.id));
     }
@@ -893,6 +954,7 @@ class DownloadProvider extends ChangeNotifier {
     _lastProgressValues.clear();
     _lastBytesValues.clear();
     _lastTimeValues.clear();
+    _smoothedSpeedValues.clear();
     _lastNotificationTimes.clear();
     _lastHistorySnapshotTimes.clear();
     for (final notifier in _progressNotifiers.values) {

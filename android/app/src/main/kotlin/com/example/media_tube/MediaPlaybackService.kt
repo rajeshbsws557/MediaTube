@@ -51,6 +51,11 @@ class MediaPlaybackService : Service() {
         private const val NOTIFICATION_ID = 90501
     }
 
+    private data class SessionUpdateFlags(
+        val metadataChanged: Boolean,
+        val notificationChanged: Boolean,
+    )
+
     private val artworkExecutor = Executors.newSingleThreadExecutor()
     private var mediaSession: MediaSessionCompat? = null
     private var notificationManager: NotificationManager? = null
@@ -66,6 +71,8 @@ class MediaPlaybackService : Service() {
     private var artworkBitmap: Bitmap? = null
     private var isForeground: Boolean = false
     private var artworkRequestToken: Long = 0L
+    private var hasPublishedNotification: Boolean = false
+    private var lastNotificationSignature: Int = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -78,13 +85,16 @@ class MediaPlaybackService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) {
-            return START_NOT_STICKY
+            return if (isPlaying || isForeground) START_STICKY else START_NOT_STICKY
         }
 
         when (intent.action) {
             ACTION_UPDATE_SESSION -> {
-                updateSession(intent)
-                publishPlaybackSurface()
+                val updateFlags = updateSession(intent)
+                publishPlaybackSurface(
+                    forceMetadataUpdate = updateFlags.metadataChanged,
+                    forceNotificationUpdate = updateFlags.notificationChanged,
+                )
             }
 
             ACTION_STOP_SESSION -> {
@@ -105,7 +115,7 @@ class MediaPlaybackService : Service() {
             }
         }
 
-        return START_NOT_STICKY
+        return if (isPlaying || isForeground) START_STICKY else START_NOT_STICKY
     }
 
     private fun setupMediaSession() {
@@ -145,20 +155,61 @@ class MediaPlaybackService : Service() {
         updateMetadata()
     }
 
-    private fun updateSession(intent: Intent) {
-        currentTitle = intent.getStringExtra(EXTRA_TITLE) ?: currentTitle
-        currentSubtitle = intent.getStringExtra(EXTRA_SUBTITLE) ?: currentSubtitle
-        currentDurationMs = intent.getLongExtra(EXTRA_DURATION_MS, currentDurationMs).coerceAtLeast(0L)
+    private fun updateSession(intent: Intent): SessionUpdateFlags {
+        var metadataChanged = false
+        var notificationChanged = false
+
+        val nextTitle = intent.getStringExtra(EXTRA_TITLE) ?: currentTitle
+        if (nextTitle != currentTitle) {
+            currentTitle = nextTitle
+            metadataChanged = true
+            notificationChanged = true
+        }
+
+        val nextSubtitle = intent.getStringExtra(EXTRA_SUBTITLE) ?: currentSubtitle
+        if (nextSubtitle != currentSubtitle) {
+            currentSubtitle = nextSubtitle
+            metadataChanged = true
+            notificationChanged = true
+        }
+
+        val nextDurationMs = intent.getLongExtra(EXTRA_DURATION_MS, currentDurationMs).coerceAtLeast(0L)
+        if (nextDurationMs != currentDurationMs) {
+            currentDurationMs = nextDurationMs
+            metadataChanged = true
+        }
+
         currentPositionMs = intent.getLongExtra(EXTRA_POSITION_MS, currentPositionMs).coerceAtLeast(0L)
-        currentMimeType = intent.getStringExtra(EXTRA_MIME_TYPE) ?: currentMimeType
-        isPlaying = intent.getBooleanExtra(EXTRA_IS_PLAYING, isPlaying)
-        isVideo = intent.getBooleanExtra(EXTRA_IS_VIDEO, isVideo)
+
+        val nextMimeType = intent.getStringExtra(EXTRA_MIME_TYPE) ?: currentMimeType
+        if (nextMimeType != currentMimeType) {
+            currentMimeType = nextMimeType
+        }
+
+        val nextIsPlaying = intent.getBooleanExtra(EXTRA_IS_PLAYING, isPlaying)
+        if (nextIsPlaying != isPlaying) {
+            isPlaying = nextIsPlaying
+            notificationChanged = true
+        }
+
+        val nextIsVideo = intent.getBooleanExtra(EXTRA_IS_VIDEO, isVideo)
+        if (nextIsVideo != isVideo) {
+            isVideo = nextIsVideo
+            notificationChanged = true
+        }
 
         val nextArtwork = intent.getStringExtra(EXTRA_ARTWORK_URI)
         if (nextArtwork != currentArtworkUri) {
             currentArtworkUri = nextArtwork
+            metadataChanged = true
+            notificationChanged = true
             fetchArtworkAsync(nextArtwork)
         }
+
+        return SessionUpdateFlags(
+            metadataChanged = metadataChanged,
+            notificationChanged = notificationChanged,
+        )
     }
 
     private fun fetchArtworkAsync(uri: String?) {
@@ -166,7 +217,10 @@ class MediaPlaybackService : Service() {
 
         if (uri.isNullOrBlank()) {
             artworkBitmap = null
-            publishPlaybackSurface()
+            publishPlaybackSurface(
+                forceMetadataUpdate = true,
+                forceNotificationUpdate = true,
+            )
             return
         }
 
@@ -178,12 +232,15 @@ class MediaPlaybackService : Service() {
             }
 
             artworkBitmap = loaded
-            publishPlaybackSurface()
+            publishPlaybackSurface(
+                forceMetadataUpdate = true,
+                forceNotificationUpdate = true,
+            )
         }
     }
 
     private fun loadArtwork(uri: String): Bitmap? {
-        return when {
+        val decoded = when {
             uri.startsWith("http://", ignoreCase = true) || uri.startsWith("https://", ignoreCase = true) -> {
                 URL(uri).openStream().use { stream ->
                     BitmapFactory.decodeStream(stream)
@@ -200,6 +257,26 @@ class MediaPlaybackService : Service() {
 
             else -> null
         }
+
+        return scaleArtworkIfNeeded(decoded)
+    }
+
+    private fun scaleArtworkIfNeeded(bitmap: Bitmap?): Bitmap? {
+        val source = bitmap ?: return null
+        val maxDimension = 512
+
+        if (source.width <= maxDimension && source.height <= maxDimension) {
+            return source
+        }
+
+        val widthScale = maxDimension.toFloat() / source.width.toFloat()
+        val heightScale = maxDimension.toFloat() / source.height.toFloat()
+        val scale = minOf(widthScale, heightScale)
+
+        val targetWidth = (source.width * scale).toInt().coerceAtLeast(1)
+        val targetHeight = (source.height * scale).toInt().coerceAtLeast(1)
+
+        return Bitmap.createScaledBitmap(source, targetWidth, targetHeight, true)
     }
 
     private fun forwardControlAction(action: String) {
@@ -250,14 +327,40 @@ class MediaPlaybackService : Service() {
         session.setMetadata(metadata.build())
     }
 
-    private fun publishPlaybackSurface() {
+    private fun publishPlaybackSurface(
+        forceMetadataUpdate: Boolean = false,
+        forceNotificationUpdate: Boolean = false,
+    ) {
         updatePlaybackState()
-        updateMetadata()
-        showPlaybackNotification()
+        if (forceMetadataUpdate) {
+            updateMetadata()
+        }
+        showPlaybackNotification(forceRebuild = forceNotificationUpdate)
     }
 
-    private fun showPlaybackNotification() {
+    private fun currentNotificationSignature(): Int {
+        var signature = 17
+        signature = 31 * signature + currentTitle.hashCode()
+        signature = 31 * signature + currentSubtitle.hashCode()
+        signature = 31 * signature + isPlaying.hashCode()
+        signature = 31 * signature + isVideo.hashCode()
+        signature = 31 * signature + (currentArtworkUri?.hashCode() ?: 0)
+        signature = 31 * signature + (artworkBitmap?.hashCode() ?: 0)
+        return signature
+    }
+
+    private fun showPlaybackNotification(forceRebuild: Boolean = false) {
         val session = mediaSession ?: return
+        val expectedForeground = isPlaying
+        val signature = currentNotificationSignature()
+
+        if (!forceRebuild &&
+            hasPublishedNotification &&
+            signature == lastNotificationSignature &&
+            isForeground == expectedForeground
+        ) {
+            return
+        }
 
         val launchIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -327,11 +430,15 @@ class MediaPlaybackService : Service() {
         if (isPlaying && !isForeground) {
             startForeground(NOTIFICATION_ID, notification)
             isForeground = true
+            hasPublishedNotification = true
+            lastNotificationSignature = signature
             return
         }
 
         if (isPlaying) {
             notificationManager?.notify(NOTIFICATION_ID, notification)
+            hasPublishedNotification = true
+            lastNotificationSignature = signature
             return
         }
 
@@ -346,6 +453,8 @@ class MediaPlaybackService : Service() {
         }
 
         notificationManager?.notify(NOTIFICATION_ID, notification)
+        hasPublishedNotification = true
+        lastNotificationSignature = signature
     }
 
     private fun clearSession(resetState: Boolean = false) {
@@ -355,6 +464,9 @@ class MediaPlaybackService : Service() {
         } else {
             notificationManager?.cancel(NOTIFICATION_ID)
         }
+
+        hasPublishedNotification = false
+        lastNotificationSignature = 0
 
         if (!resetState) {
             return

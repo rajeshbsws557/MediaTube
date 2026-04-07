@@ -731,7 +731,11 @@ class _BrowserScreenState extends State<BrowserScreen>
 
           return Stack(
             children: [
-              Positioned.fill(child: _buildWebView()),
+              Positioned.fill(
+                child: SafeArea(
+                  child: _buildWebView(),
+                ),
+              ),
               if (_isOmniMenuExpanded || _omniMenuController.value > 0)
                 Positioned.fill(
                   child: IgnorePointer(
@@ -769,7 +773,7 @@ class _BrowserScreenState extends State<BrowserScreen>
                   isFetchingMedia: provider.isFetchingMedia,
                 ),
                 builder: (context, streamState, _) {
-                  _syncStreamPulseState(streamState.hasDetectedMedia);
+                  _syncStreamPulseState(streamState.isFetchingMedia);
 
                   final streamFabAbsolute = _normalizedToAbsolute(
                     _streamFabNormalized,
@@ -1787,8 +1791,6 @@ class _BrowserScreenState extends State<BrowserScreen>
                 canGoForward: canGoForward,
               );
 
-              unawaited(_injectPlaybackKeepAliveScript());
-              unawaited(_forceCurrentVideoPlayback());
               unawaited(_syncRequestInterceptionMode(provider));
             },
             onTitleChanged: (controller, title) {

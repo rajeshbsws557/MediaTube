@@ -114,11 +114,19 @@ class UpdateManager {
   );
 
   CancelToken? _cancelToken;
+  bool _isCheckingForUpdates = false;
+  bool _isUpdateDialogVisible = false;
 
   Future<void> checkForUpdates(
     BuildContext context, {
     bool showNoUpdateMessage = false,
   }) async {
+    if (_isCheckingForUpdates) {
+      return;
+    }
+
+    _isCheckingForUpdates = true;
+
     try {
       final versionInfo = await _fetchGitHubVersionInfo();
       if (versionInfo == null || versionInfo.downloadUrl.isEmpty) {
@@ -138,7 +146,7 @@ class UpdateManager {
       debugPrint('Current: $currentVersion, GitHub: ${versionInfo.version}');
 
       if (_isNewerVersion(versionInfo.version, currentVersion)) {
-        if (context.mounted) {
+        if (context.mounted && !_isUpdateDialogVisible) {
           _showBeautifulUpdateDialog(context, versionInfo, currentVersion);
         }
       } else {
@@ -155,6 +163,8 @@ class UpdateManager {
           SnackBar(content: Text('Error: $e')),
         );
       }
+    } finally {
+      _isCheckingForUpdates = false;
     }
   }
 
@@ -238,6 +248,12 @@ class UpdateManager {
     AppVersionInfo info,
     String currentVer,
   ) {
+    if (_isUpdateDialogVisible) {
+      return;
+    }
+
+    _isUpdateDialogVisible = true;
+
     final highlights = _extractHighlightPoints(info.changelog);
     const highlightIcons = <IconData>[
       Icons.link,
@@ -482,7 +498,9 @@ class UpdateManager {
           ),
         );
       },
-    );
+    ).whenComplete(() {
+      _isUpdateDialogVisible = false;
+    });
   }
 
   List<String> _extractHighlightPoints(String changelog) {

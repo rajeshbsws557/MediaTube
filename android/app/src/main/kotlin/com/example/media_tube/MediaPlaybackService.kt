@@ -15,7 +15,6 @@ import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import androidx.media.app.NotificationCompat.MediaStyle
-import com.rajesh.mediatube.R
 import java.io.File
 import java.net.URL
 import java.util.concurrent.Executors
@@ -66,6 +65,7 @@ class MediaPlaybackService : Service() {
     private var currentArtworkUri: String? = null
     private var artworkBitmap: Bitmap? = null
     private var isForeground: Boolean = false
+    private var artworkRequestToken: Long = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -78,7 +78,7 @@ class MediaPlaybackService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) {
-            return START_STICKY
+            return START_NOT_STICKY
         }
 
         when (intent.action) {
@@ -88,19 +88,24 @@ class MediaPlaybackService : Service() {
             }
 
             ACTION_STOP_SESSION -> {
-                clearSession()
-                stopSelf()
+                clearSession(resetState = true)
+                stopSelfResult(startId)
             }
 
             ACTION_CONTROL -> {
                 val action = intent.getStringExtra(EXTRA_CONTROL_ACTION)
                 if (!action.isNullOrBlank()) {
                     forwardControlAction(action)
+
+                    if (action == CONTROL_STOP) {
+                        clearSession(resetState = true)
+                        stopSelfResult(startId)
+                    }
                 }
             }
         }
 
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     private fun setupMediaSession() {
@@ -157,6 +162,8 @@ class MediaPlaybackService : Service() {
     }
 
     private fun fetchArtworkAsync(uri: String?) {
+        val requestToken = ++artworkRequestToken
+
         if (uri.isNullOrBlank()) {
             artworkBitmap = null
             publishPlaybackSurface()
@@ -165,6 +172,11 @@ class MediaPlaybackService : Service() {
 
         artworkExecutor.execute {
             val loaded = runCatching { loadArtwork(uri) }.getOrNull()
+
+            if (requestToken != artworkRequestToken) {
+                return@execute
+            }
+
             artworkBitmap = loaded
             publishPlaybackSurface()
         }
@@ -281,7 +293,7 @@ class MediaPlaybackService : Service() {
         )
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(android.R.drawable.stat_sys_headset)
             .setContentTitle(currentTitle)
             .setContentText(if (currentSubtitle.isNotBlank()) currentSubtitle else if (isVideo) "Video" else "Audio")
             .setSubText(if (isPlaying) "Playing" else "Paused")
@@ -336,13 +348,53 @@ class MediaPlaybackService : Service() {
         notificationManager?.notify(NOTIFICATION_ID, notification)
     }
 
-    private fun clearSession() {
+    private fun clearSession(resetState: Boolean = false) {
         if (isForeground) {
             stopForeground(true)
             isForeground = false
         } else {
             notificationManager?.cancel(NOTIFICATION_ID)
         }
+
+        if (!resetState) {
+            return
+        }
+
+        artworkRequestToken++
+        currentTitle = "MediaTube"
+        currentSubtitle = ""
+        currentDurationMs = 0L
+        currentPositionMs = 0L
+        currentMimeType = "video/mp4"
+        isPlaying = false
+        isVideo = true
+        currentArtworkUri = null
+        artworkBitmap = null
+
+        mediaSession?.setPlaybackState(
+            PlaybackStateCompat.Builder()
+                .setActions(
+                    PlaybackStateCompat.ACTION_PLAY or
+                        PlaybackStateCompat.ACTION_PAUSE or
+                        PlaybackStateCompat.ACTION_PLAY_PAUSE or
+                        PlaybackStateCompat.ACTION_STOP or
+                        PlaybackStateCompat.ACTION_SEEK_TO,
+                )
+                .setState(
+                    PlaybackStateCompat.STATE_STOPPED,
+                    0L,
+                    0f,
+                    SystemClock.elapsedRealtime(),
+                )
+                .build(),
+        )
+
+        mediaSession?.setMetadata(
+            MediaMetadataCompat.Builder()
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, "MediaTube")
+                .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, 0L)
+                .build(),
+        )
     }
 
     private fun createNotificationChannel() {
@@ -363,7 +415,7 @@ class MediaPlaybackService : Service() {
     }
 
     override fun onDestroy() {
-        clearSession()
+        clearSession(resetState = true)
         mediaSession?.isActive = false
         mediaSession?.release()
         mediaSession = null

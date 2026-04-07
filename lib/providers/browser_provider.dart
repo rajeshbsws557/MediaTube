@@ -24,11 +24,14 @@ class BrowserProvider extends ChangeNotifier {
 
   // Detected media
   final List<DetectedMedia> _detectedMedia = [];
+  late final UnmodifiableListView<DetectedMedia> _detectedMediaView =
+      UnmodifiableListView<DetectedMedia>(_detectedMedia);
   bool _isYouTubePage = false;
   bool _isSocialVideoPage = false;
   bool _isFetchingYouTube = false;
   bool _isFetchingGeneric = false;
   String? _fetchError;
+  int _mediaStateVersion = 0;
 
   // Track current YouTube video to detect navigation within YouTube
   String? _currentYouTubeVideoId;
@@ -116,7 +119,7 @@ class BrowserProvider extends ChangeNotifier {
   bool get isLoading => _isLoading;
   bool get canGoBack => _canGoBack;
   bool get canGoForward => _canGoForward;
-  List<DetectedMedia> get detectedMedia => List.unmodifiable(_detectedMedia);
+  List<DetectedMedia> get detectedMedia => _detectedMediaView;
   bool get hasDetectedMedia => _detectedMedia.isNotEmpty;
   bool get isYouTubePage => _isYouTubePage;
   bool get isSocialVideoPage => _isSocialVideoPage;
@@ -127,6 +130,7 @@ class BrowserProvider extends ChangeNotifier {
       _isSocialVideoPage || _isFetchingGeneric;
   String? get fetchError => _fetchError;
   bool get hasFetchError => _fetchError != null;
+  int get mediaStateVersion => _mediaStateVersion;
 
   /// Returns the next pending URL or null if the queue is empty.
   String? get pendingUrl => _pendingUrls.isNotEmpty ? _pendingUrls.first : null;
@@ -171,12 +175,12 @@ class BrowserProvider extends ChangeNotifier {
 
     // If we just navigated to YouTube or video changed
     if (_isYouTubePage && (!wasYouTube || videoChanged)) {
-      _detectedMedia.clear();
+      _clearDetectedMedia();
       _fetchError = null;
 
       // INSTANT loading from cache - no fetch needed!
       if (newVideoId != null && _streamCache.containsKey(newVideoId)) {
-        _detectedMedia.addAll(_streamCache[newVideoId]!);
+        _appendDetectedMedia(_streamCache[newVideoId]!);
         notifyListeners();
         return;
       }
@@ -218,7 +222,7 @@ class BrowserProvider extends ChangeNotifier {
   void addNewTab({String url = 'https://google.com'}) {
     _tabs.add(BrowserTab(url: url));
     _activeTabIndex = _tabs.length - 1;
-    _detectedMedia.clear();
+    _clearDetectedMedia();
     _fetchError = null;
     notifyListeners();
   }
@@ -226,7 +230,7 @@ class BrowserProvider extends ChangeNotifier {
   void switchTab(int index) {
     if (index >= 0 && index < _tabs.length && index != _activeTabIndex) {
       _activeTabIndex = index;
-      _detectedMedia.clear();
+      _clearDetectedMedia();
       _fetchError = null;
       notifyListeners();
       // Need to re-trigger detect logic for the new active tab's URL
@@ -238,7 +242,7 @@ class BrowserProvider extends ChangeNotifier {
     if (_tabs.length <= 1) {
       // Don't close last tab, just reset it
       _tabs[0] = BrowserTab(url: 'https://m.youtube.com');
-      _detectedMedia.clear();
+      _clearDetectedMedia();
       notifyListeners();
       return;
     }
@@ -250,7 +254,7 @@ class BrowserProvider extends ChangeNotifier {
       _activeTabIndex--;
     }
 
-    _detectedMedia.clear();
+    _clearDetectedMedia();
     _fetchError = null;
     notifyListeners();
   }
@@ -266,6 +270,44 @@ class BrowserProvider extends ChangeNotifier {
     _canGoBack = canGoBack;
     _canGoForward = canGoForward;
     notifyListeners();
+  }
+
+  void _bumpMediaStateVersion() {
+    // Keep this bounded while still monotonically changing for selectors.
+    _mediaStateVersion = (_mediaStateVersion + 1) & 0x3fffffff;
+  }
+
+  void _clearDetectedMedia() {
+    if (_detectedMedia.isEmpty) {
+      return;
+    }
+    _detectedMedia.clear();
+    _bumpMediaStateVersion();
+  }
+
+  void _appendDetectedMedia(Iterable<DetectedMedia> mediaItems) {
+    if (mediaItems.isEmpty) {
+      return;
+    }
+    _detectedMedia.addAll(mediaItems);
+    _bumpMediaStateVersion();
+  }
+
+  void _replaceDetectedMedia(Iterable<DetectedMedia> mediaItems) {
+    _detectedMedia
+      ..clear()
+      ..addAll(mediaItems);
+    _bumpMediaStateVersion();
+  }
+
+  void _setDetectedMediaAt(int index, DetectedMedia media) {
+    _detectedMedia[index] = media;
+    _bumpMediaStateVersion();
+  }
+
+  void _addDetectedMedia(DetectedMedia media) {
+    _detectedMedia.add(media);
+    _bumpMediaStateVersion();
   }
 
   bool _isHttpMediaUrl(String url) {
@@ -569,12 +611,12 @@ class BrowserProvider extends ChangeNotifier {
       final current = _detectedMedia[i];
       if (current.url != url) continue;
       if (current.fileSize != null && current.fileSize! > 0) continue;
-      _detectedMedia[i] = current.copyWith(fileSize: bytes);
+      _setDetectedMediaAt(i, current.copyWith(fileSize: bytes));
       changed = true;
     }
 
     if (changed) {
-      notifyListeners();
+      _notifyMediaStateThrottled();
     }
   }
 
@@ -785,12 +827,17 @@ class BrowserProvider extends ChangeNotifier {
           (media.fileSize != null && media.fileSize! > 0);
 
       if (canFillMissingSize && !hasBetterScore) {
-        _detectedMedia[existingIndex] = current.copyWith(fileSize: media.fileSize);
+        _setDetectedMediaAt(
+          existingIndex,
+          current.copyWith(fileSize: media.fileSize),
+        );
         return true;
       }
 
       if (hasBetterScore) {
-        _detectedMedia[existingIndex] = media.copyWith(
+        _setDetectedMediaAt(
+          existingIndex,
+          media.copyWith(
           title: media.title.isNotEmpty ? media.title : current.title,
           source: media.source == MediaSource.generic
               ? current.source
@@ -805,6 +852,7 @@ class BrowserProvider extends ChangeNotifier {
           streamIndex: media.streamIndex ?? current.streamIndex,
           backendQuality: media.backendQuality ?? current.backendQuality,
           useBackend: media.useBackend || current.useBackend,
+          ),
         );
         return true;
       }
@@ -813,7 +861,7 @@ class BrowserProvider extends ChangeNotifier {
     }
 
     if (_detectedMedia.length < _maxDetectedMediaItems) {
-      _detectedMedia.add(media);
+      _addDetectedMedia(media);
       return true;
     }
 
@@ -829,7 +877,7 @@ class BrowserProvider extends ChangeNotifier {
 
     final candidateScore = _mediaScore(media);
     if (candidateScore > weakestScore) {
-      _detectedMedia[weakestIndex] = media;
+      _setDetectedMediaAt(weakestIndex, media);
       return true;
     }
 
@@ -922,7 +970,7 @@ class BrowserProvider extends ChangeNotifier {
     // Double-check cache
     if (_streamCache.containsKey(videoId)) {
       if (_currentYouTubeVideoId == videoId && _detectedMedia.isEmpty) {
-        _detectedMedia.addAll(_streamCache[videoId]!);
+        _appendDetectedMedia(_streamCache[videoId]!);
         notifyListeners();
       }
       return;
@@ -947,8 +995,7 @@ class BrowserProvider extends ChangeNotifier {
 
       // Update UI if still on same video
       if (_currentYouTubeVideoId == videoId) {
-        _detectedMedia.clear();
-        _detectedMedia.addAll(streams);
+        _replaceDetectedMedia(streams);
         _fetchError = null;
       }
     } catch (e) {
@@ -992,7 +1039,7 @@ class BrowserProvider extends ChangeNotifier {
     // Use cache if available (and not force refreshing)
     if (!forceRefresh && _streamCache.containsKey(videoId)) {
       if (_detectedMedia.isEmpty) {
-        _detectedMedia.addAll(_streamCache[videoId]!);
+        _appendDetectedMedia(_streamCache[videoId]!);
         notifyListeners();
       }
       return;
@@ -1016,7 +1063,7 @@ class BrowserProvider extends ChangeNotifier {
     _isFetchingGeneric = true;
     _fetchError = null;
     if (forceRefresh && runHeadlessExtractor) {
-      _detectedMedia.clear();
+      _clearDetectedMedia();
     }
 
     if (runHeadlessExtractor) {
@@ -1080,13 +1127,13 @@ class BrowserProvider extends ChangeNotifier {
 
   /// Clear detected media
   void clearDetectedMedia() {
-    _detectedMedia.clear();
+    _clearDetectedMedia();
     notifyListeners();
   }
 
   /// Clear all state when navigating to a new page
   void onPageStarted(String url) {
-    _detectedMedia.clear();
+    _clearDetectedMedia();
     _fetchError = null;
     _sizeProbeQueue.clear();
     _recentResourceHits.clear();

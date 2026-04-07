@@ -62,94 +62,25 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
             color: Theme.of(context).colorScheme.surface,
             borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
           ),
-          child: Column(
-            children: [
-              // Handle
-              Container(
-                margin: const EdgeInsets.symmetric(vertical: 8),
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.grey[400],
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-
-              // Header
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 8,
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      widget.isYouTube
-                          ? Icons.play_circle
-                          : Icons.video_library,
-                      color: widget.isYouTube ? Colors.red : null,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            widget.isYouTube
-                                ? 'YouTube Streams'
-                                : 'Detected Media',
-                            style: Theme.of(context).textTheme.titleLarge,
-                          ),
-                          if (widget.media.isNotEmpty)
-                            Text(
-                              '${widget.media.length} streams available',
-                              style: Theme.of(context).textTheme.bodySmall
-                                  ?.copyWith(color: Colors.grey[600]),
-                            ),
-                        ],
-                      ),
-                    ),
-                    if (widget.isYouTube)
-                      IconButton(
-                        icon: (_isRefreshing || widget.isFetching)
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                ),
-                              )
-                            : const Icon(Icons.refresh),
-                        tooltip: 'Refresh streams',
-                        onPressed: (_isRefreshing || widget.isFetching)
-                            ? null
-                            : _handleRefresh,
-                      ),
-                  ],
-                ),
-              ),
-
-              // Quick download button for best quality
+          child: CustomScrollView(
+            controller: scrollController,
+            cacheExtent: 600,
+            physics: const BouncingScrollPhysics(
+              parent: AlwaysScrollableScrollPhysics(),
+            ),
+            slivers: [
+              SliverToBoxAdapter(child: _buildSheetHandle()),
+              SliverToBoxAdapter(child: _buildHeader(context)),
               if (widget.media.isNotEmpty) ...[
-                _buildHeroThumbnail(),
-                const SizedBox(height: 16),
-                _buildTypeToggle(),
-                const SizedBox(height: 8),
-                _buildQuickDownloadBar(context),
+                SliverToBoxAdapter(child: _buildHeroThumbnail(context)),
+                const SliverToBoxAdapter(child: SizedBox(height: 16)),
+                SliverToBoxAdapter(child: _buildTypeToggle()),
+                const SliverToBoxAdapter(child: SizedBox(height: 8)),
+                SliverToBoxAdapter(child: _buildQuickDownloadBar(context)),
               ],
-
-              const Divider(height: 1),
-
-              // Media list
-              Expanded(
-                child: widget.isFetching && widget.media.isEmpty
-                    ? _buildLoadingState()
-                    : widget.errorMessage != null && widget.media.isEmpty
-                    ? _buildErrorState()
-                    : widget.media.isEmpty
-                    ? _buildEmptyState()
-                    : _buildMediaList(scrollController),
-              ),
+              const SliverToBoxAdapter(child: Divider(height: 1)),
+              ..._buildBodySlivers(),
+              const SliverToBoxAdapter(child: SizedBox(height: 16)),
             ],
           ),
         );
@@ -157,9 +88,130 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
     );
   }
 
-  Widget _buildHeroThumbnail() {
+  Widget _buildSheetHandle() {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 8),
+      width: 40,
+      height: 4,
+      decoration: BoxDecoration(
+        color: Colors.grey[400],
+        borderRadius: BorderRadius.circular(2),
+      ),
+    );
+  }
+
+  Widget _buildHeader(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: 16,
+        vertical: 8,
+      ),
+      child: Row(
+        children: [
+          Icon(
+            widget.isYouTube ? Icons.play_circle : Icons.video_library,
+            color: widget.isYouTube ? Colors.red : null,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  widget.isYouTube ? 'YouTube Streams' : 'Detected Media',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                if (widget.media.isNotEmpty)
+                  Text(
+                    '${widget.media.length} streams available',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Colors.grey[600],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          if (widget.isYouTube)
+            IconButton(
+              icon: (_isRefreshing || widget.isFetching)
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                      ),
+                    )
+                  : const Icon(Icons.refresh),
+              tooltip: 'Refresh streams',
+              onPressed: (_isRefreshing || widget.isFetching)
+                  ? null
+                  : _handleRefresh,
+            ),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _buildBodySlivers() {
+    if (widget.isFetching && widget.media.isEmpty) {
+      return [_buildStateSliver(_buildLoadingState())];
+    }
+
+    if (widget.errorMessage != null && widget.media.isEmpty) {
+      return [_buildStateSliver(_buildErrorState())];
+    }
+
+    if (widget.media.isEmpty) {
+      return [_buildStateSliver(_buildEmptyState())];
+    }
+
+    return _buildMediaListSlivers();
+  }
+
+  Widget _buildStateSliver(Widget child) {
+    return SliverPadding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+      sliver: SliverFillRemaining(
+        hasScrollBody: false,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 280),
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNoStreamsForSelectedTypeState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              _selectedType == MediaType.video ? Icons.videocam_off : Icons.music_off,
+              size: 48,
+              color: Colors.grey[400],
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'No ${_selectedType == MediaType.video ? "video" : "audio"} streams available',
+              style: TextStyle(color: Colors.grey[600]),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHeroThumbnail(BuildContext context) {
     final firstMedia = widget.media.firstOrNull;
     if (firstMedia?.thumbnailUrl == null) return const SizedBox.shrink();
+
+    final logicalWidth = MediaQuery.sizeOf(context).width - 32;
+    final pixelRatio = MediaQuery.of(context).devicePixelRatio;
+    final cacheWidth = (logicalWidth * pixelRatio).clamp(320.0, 1920.0).round();
+    final cacheHeight = (cacheWidth * 9 / 16).round();
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -170,6 +222,9 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
           child: Image.network(
             firstMedia!.thumbnailUrl!,
             fit: BoxFit.cover,
+            cacheWidth: cacheWidth,
+            cacheHeight: cacheHeight,
+            filterQuality: FilterQuality.low,
             errorBuilder: (context, error, stackTrace) => Container(
               color: Colors.grey[200],
               child: const Icon(
@@ -481,10 +536,9 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
 
     await Future.delayed(const Duration(milliseconds: 120));
 
-    await navigator.push(
-      MaterialPageRoute(
-        builder: (_) => YoutubePlaybackScreen(media: media),
-      ),
+    await YoutubePlaybackScreen.pushBackground(
+      navigator: navigator,
+      media: media,
     );
   }
 
@@ -574,52 +628,28 @@ class _MediaSelectionSheetState extends State<MediaSelectionSheet> {
     );
   }
 
-  Widget _buildMediaList(ScrollController scrollController) {
+  List<Widget> _buildMediaListSlivers() {
     // Filter media by selected type
     final filteredMedia = widget.media
         .where((m) => m.type == _selectedType)
         .toList();
 
     if (filteredMedia.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                _selectedType == MediaType.video
-                    ? Icons.videocam_off
-                    : Icons.music_off,
-                size: 48,
-                color: Colors.grey[400],
-              ),
-              const SizedBox(height: 16),
-              Text(
-                'No ${_selectedType == MediaType.video ? "video" : "audio"} streams available',
-                style: TextStyle(color: Colors.grey[600]),
-              ),
-            ],
-          ),
-        ),
-      );
+      return [_buildStateSliver(_buildNoStreamsForSelectedTypeState())];
     }
 
-    return ListView.builder(
-      controller: scrollController,
-      padding: const EdgeInsets.only(bottom: 16),
-      // Performance optimizations for smooth 60fps scrolling
-      cacheExtent: 500,
-      physics: const BouncingScrollPhysics(
-        parent: AlwaysScrollableScrollPhysics(),
+    return [
+      SliverPadding(
+        padding: const EdgeInsets.only(bottom: 16),
+        sliver: SliverList(
+          delegate: SliverChildBuilderDelegate((context, index) {
+            return RepaintBoundary(
+              child: _MediaListItem(media: filteredMedia[index]),
+            );
+          }, childCount: filteredMedia.length),
+        ),
       ),
-      itemCount: filteredMedia.length,
-      itemBuilder: (context, index) {
-        return RepaintBoundary(
-          child: _MediaListItem(media: filteredMedia[index]),
-        );
-      },
-    );
+    ];
   }
 }
 
@@ -711,6 +741,7 @@ class _MediaListItemState extends State<_MediaListItem> {
                 fit: BoxFit.cover,
                 cacheWidth: 112,
                 cacheHeight: 112,
+                filterQuality: FilterQuality.low,
                 loadingBuilder: (context, child, loadingProgress) {
                   if (loadingProgress == null) return child;
                   return Center(

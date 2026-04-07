@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/models.dart';
@@ -8,11 +9,24 @@ import '../services/services.dart';
 
 class YoutubePlaybackScreen extends StatefulWidget {
   final DetectedMedia media;
+  final bool autoBackgroundStart;
 
   const YoutubePlaybackScreen({
     super.key,
     required this.media,
+    this.autoBackgroundStart = true,
   });
+
+  static Future<T?> pushBackground<T>({
+    required NavigatorState navigator,
+    required DetectedMedia media,
+  }) {
+    return navigator.push<T>(
+      MaterialPageRoute(
+        builder: (_) => YoutubePlaybackScreen(media: media),
+      ),
+    );
+  }
 
   @override
   State<YoutubePlaybackScreen> createState() => _YoutubePlaybackScreenState();
@@ -32,6 +46,10 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
   DateTime _lastUiRefreshAt = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastNativeRuntimeSyncAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool? _lastKnownIsPlaying;
+  bool _hasAutoBackgroundHandoff = false;
+  bool _isDisposed = false;
+  bool _didStopMediaSessionAfterCompletion = false;
+  int _activePlaybackSessionId = 0;
 
   bool get _isAudioOnly => widget.media.type == MediaType.audio;
 
@@ -50,6 +68,7 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
 
   @override
   void dispose() {
+    _isDisposed = true;
     WidgetsBinding.instance.removeObserver(this);
     _nativeControlSubscription?.cancel();
     unawaited(
@@ -61,35 +80,58 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
       ),
     );
     unawaited(_nativePlaybackBridge.stopMediaSession());
-    final controller = _controller;
-    if (controller != null) {
-      controller.removeListener(_onControllerTick);
-      controller.dispose();
-    }
+    unawaited(_disposeCurrentController(resetPlaybackState: false));
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      final controller = _controller;
-      if (controller != null && controller.value.isInitialized) {
-        unawaited(
-          _syncPlaybackRuntimeState(
-            isPlaying: controller.value.isPlaying,
-            force: true,
-          ),
-        );
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) {
+      return;
+    }
+
+    if (state == AppLifecycleState.inactive || state == AppLifecycleState.paused) {
+      if (!_isAudioOnly && controller.value.isPlaying) {
+        unawaited(_nativePlaybackBridge.enterPipNow());
       }
+
+      unawaited(
+        _syncPlaybackRuntimeState(
+          isPlaying: controller.value.isPlaying,
+          force: true,
+        ),
+      );
+      return;
+    }
+
+    if (state == AppLifecycleState.resumed) {
+      unawaited(
+        _syncPlaybackRuntimeState(
+          isPlaying: controller.value.isPlaying,
+          force: true,
+        ),
+      );
     }
   }
 
   Future<void> _initializePlayer() async {
+    final playbackSessionId = ++_activePlaybackSessionId;
+
     setState(() {
       _isInitializing = true;
       _hasError = false;
       _errorText = null;
     });
+
+    await _disposeCurrentController();
+
+    if (_isSessionStale(playbackSessionId)) {
+      return;
+    }
+
+    _hasAutoBackgroundHandoff = false;
+    _didStopMediaSessionAfterCompletion = false;
 
     try {
       final uri = Uri.parse(widget.media.url);
@@ -101,15 +143,29 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
         ),
       );
 
+      _controller = controller;
+
       await controller.initialize();
+      if (_isSessionStale(playbackSessionId)) {
+        await controller.dispose();
+        return;
+      }
+
       await controller.setLooping(false);
       await controller.play();
 
-      controller.addListener(_onControllerTick);
+      if (_isSessionStale(playbackSessionId)) {
+        await controller.dispose();
+        return;
+      }
 
-      _controller = controller;
+      controller.addListener(_onControllerTick);
       await _configurePictureInPicture(controller);
-      await _syncPlaybackRuntimeState(isPlaying: true, force: true);
+      await _syncPlaybackRuntimeState(
+        isPlaying: true,
+        force: true,
+        expectedSessionId: playbackSessionId,
+      );
 
       if (!mounted) {
         return;
@@ -118,7 +174,12 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
       setState(() {
         _isInitializing = false;
       });
+      unawaited(_triggerAutoBackgroundHandoffIfNeeded());
     } catch (e) {
+      if (_isSessionStale(playbackSessionId)) {
+        return;
+      }
+
       if (!mounted) {
         return;
       }
@@ -130,8 +191,43 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     }
   }
 
-  void _onControllerTick() {
+  Future<void> _triggerAutoBackgroundHandoffIfNeeded() async {
+    if (_isDisposed || !widget.autoBackgroundStart || _hasAutoBackgroundHandoff) {
+      return;
+    }
+
+    _hasAutoBackgroundHandoff = true;
+    await Future.delayed(const Duration(milliseconds: 900));
     if (!mounted) {
+      return;
+    }
+
+    final controller = _controller;
+    if (controller == null ||
+        !controller.value.isInitialized ||
+        !controller.value.isPlaying) {
+      return;
+    }
+
+    if (!_isAudioOnly) {
+      try {
+        await _nativePlaybackBridge.enterPipNow();
+        await Future.delayed(const Duration(milliseconds: 220));
+      } catch (e) {
+        debugPrint('Auto PiP entry failed: $e');
+      }
+    }
+
+    try {
+      const platform = MethodChannel('com.rajesh.mediatube/app');
+      await platform.invokeMethod('moveToBackground');
+    } catch (e) {
+      debugPrint('Auto background handoff failed: $e');
+    }
+  }
+
+  void _onControllerTick() {
+    if (_isDisposed || !mounted) {
       return;
     }
     final controller = _controller;
@@ -140,6 +236,15 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     }
 
     final isPlaying = controller.value.isPlaying;
+    if (isPlaying) {
+      _didStopMediaSessionAfterCompletion = false;
+    } else if (!_didStopMediaSessionAfterCompletion &&
+        controller.value.duration > Duration.zero &&
+        controller.value.position >= controller.value.duration) {
+      _didStopMediaSessionAfterCompletion = true;
+      unawaited(_nativePlaybackBridge.stopMediaSession());
+    }
+
     final now = DateTime.now();
     final shouldSyncNative =
         _lastKnownIsPlaying != isPlaying ||
@@ -151,7 +256,7 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     }
 
     final shouldRefreshUi =
-        now.difference(_lastUiRefreshAt) >= const Duration(milliseconds: 220) ||
+      now.difference(_lastUiRefreshAt) >= const Duration(milliseconds: 320) ||
         controller.value.position >= controller.value.duration;
 
     if (shouldRefreshUi) {
@@ -189,7 +294,16 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
   Future<void> _syncPlaybackRuntimeState({
     required bool isPlaying,
     bool force = false,
+    int? expectedSessionId,
   }) async {
+    if (_isDisposed) {
+      return;
+    }
+
+    if (expectedSessionId != null && expectedSessionId != _activePlaybackSessionId) {
+      return;
+    }
+
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) {
       return;
@@ -208,21 +322,29 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     _lastKnownIsPlaying = isPlaying;
     _lastNativeRuntimeSyncAt = now;
 
-    await _nativePlaybackBridge.updateMediaSession(
-      title: widget.media.title,
-      subtitle: widget.media.quality ?? (_isAudioOnly ? 'Audio' : 'Video'),
-      duration: controller.value.duration,
-      position: controller.value.position,
-      isPlaying: isPlaying,
-      isVideo: !_isAudioOnly,
-      artworkUri: widget.media.thumbnailUrl,
-      mimeType: _isAudioOnly ? 'audio/mpeg' : 'video/mp4',
-    );
+    try {
+      await _nativePlaybackBridge.updateMediaSession(
+        title: widget.media.title,
+        subtitle: widget.media.quality ?? (_isAudioOnly ? 'Audio' : 'Video'),
+        duration: controller.value.duration,
+        position: controller.value.position,
+        isPlaying: isPlaying,
+        isVideo: !_isAudioOnly,
+        artworkUri: widget.media.thumbnailUrl,
+        mimeType: _isAudioOnly ? 'audio/mpeg' : 'video/mp4',
+      );
+    } catch (e) {
+      debugPrint('Failed to update native media session: $e');
+    }
   }
 
   Future<void> _handleNativePlaybackControlEvent(
     NativePlaybackControlEvent event,
   ) async {
+    if (_isDisposed) {
+      return;
+    }
+
     final controller = _controller;
     if (controller == null || !controller.value.isInitialized) {
       return;
@@ -245,7 +367,12 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
       case NativePlaybackControlAction.stop:
         await controller.pause();
         await controller.seekTo(Duration.zero);
-        break;
+        _didStopMediaSessionAfterCompletion = true;
+        await _nativePlaybackBridge.stopMediaSession();
+        if (mounted) {
+          setState(() {});
+        }
+        return;
       case NativePlaybackControlAction.seek:
         final requestedPosition = event.position;
         if (requestedPosition != null) {
@@ -312,6 +439,7 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     if (controller.value.isPlaying) {
       await controller.pause();
     } else {
+      _didStopMediaSessionAfterCompletion = false;
       await controller.play();
     }
 
@@ -323,6 +451,30 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     if (mounted) {
       setState(() {});
     }
+  }
+
+  bool _isSessionStale(int playbackSessionId) {
+    return _isDisposed || playbackSessionId != _activePlaybackSessionId;
+  }
+
+  Future<void> _disposeCurrentController({
+    bool resetPlaybackState = true,
+  }) async {
+    final controller = _controller;
+    _controller = null;
+
+    if (controller != null) {
+      controller.removeListener(_onControllerTick);
+      await controller.dispose();
+    }
+
+    if (!resetPlaybackState) {
+      return;
+    }
+
+    _lastUiRefreshAt = DateTime.fromMillisecondsSinceEpoch(0);
+    _lastNativeRuntimeSyncAt = DateTime.fromMillisecondsSinceEpoch(0);
+    _lastKnownIsPlaying = null;
   }
 
   @override
@@ -344,35 +496,38 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
             ),
         ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              widget.media.title,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: theme.textTheme.titleMedium?.copyWith(
-                fontWeight: FontWeight.w700,
+      body: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                widget.media.title,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
               ),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              _isAudioOnly
-                  ? 'Background music mode enabled. Playback continues when app is backgrounded or screen is off.'
-                  : 'Background video mode enabled. Playback continues when app is backgrounded or screen is off.',
-              style: theme.textTheme.bodySmall,
-            ),
-            const SizedBox(height: 18),
-            Expanded(
-              child: _isInitializing
-                  ? const Center(child: CircularProgressIndicator())
-                  : _hasError
-                  ? _buildErrorCard(theme)
-                  : _buildPlayerCard(controller!, theme),
-            ),
-          ],
+              const SizedBox(height: 6),
+              Text(
+                _isAudioOnly
+                    ? 'Background music mode enabled. Playback continues when app is backgrounded or screen is off.'
+                    : 'Background video mode enabled. Playback continues when app is backgrounded or screen is off.',
+                style: theme.textTheme.bodySmall,
+              ),
+              const SizedBox(height: 18),
+              Expanded(
+                child: _isInitializing
+                    ? const Center(child: CircularProgressIndicator())
+                    : _hasError
+                    ? _buildErrorCard(theme)
+                    : _buildPlayerCard(controller!, theme),
+              ),
+            ],
+          ),
         ),
       ),
     );

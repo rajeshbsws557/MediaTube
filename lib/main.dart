@@ -19,6 +19,7 @@ import 'dart:async';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+import 'package:audio_session/audio_session.dart';
 
 @pragma('vm:entry-point')
 void notificationTapBackground(NotificationResponse notificationResponse) {
@@ -43,6 +44,24 @@ void notificationTapBackground(NotificationResponse notificationResponse) {
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      systemNavigationBarColor: Colors.transparent,
+      systemNavigationBarDividerColor: Colors.transparent,
+      systemStatusBarContrastEnforced: false,
+      systemNavigationBarContrastEnforced: false,
+    ),
+  );
+
+  try {
+    final session = await AudioSession.instance;
+    await session.configure(const AudioSessionConfiguration.music());
+  } catch (e) {
+    debugPrint('Audio session configuration failed: $e');
+  }
 
   // Performance optimizations
   // Enable Impeller on Android for better rendering (if available)
@@ -74,6 +93,21 @@ void main() async {
 
 final GlobalKey<ScaffoldMessengerState> scaffoldMessengerKey =
     GlobalKey<ScaffoldMessengerState>();
+
+double _maxInset(double a, double b) => a > b ? a : b;
+
+EdgeInsets _normalizedSafePadding(MediaQueryData mediaQuery) {
+  final keyboardVisible = mediaQuery.viewInsets.bottom > 0;
+
+  return EdgeInsets.only(
+    left: _maxInset(mediaQuery.padding.left, mediaQuery.viewPadding.left),
+    top: _maxInset(mediaQuery.padding.top, mediaQuery.viewPadding.top),
+    right: _maxInset(mediaQuery.padding.right, mediaQuery.viewPadding.right),
+    bottom: keyboardVisible
+        ? mediaQuery.padding.bottom
+        : _maxInset(mediaQuery.padding.bottom, mediaQuery.viewPadding.bottom),
+  );
+}
 
 class MediaTubeApp extends StatelessWidget {
   const MediaTubeApp({super.key});
@@ -109,6 +143,17 @@ class MediaTubeApp extends StatelessWidget {
         title: 'MediaTube',
         debugShowCheckedModeBanner: false,
         scaffoldMessengerKey: scaffoldMessengerKey,
+        builder: (context, child) {
+          final mediaQuery = MediaQuery.of(context);
+          final normalizedMediaQuery = mediaQuery.copyWith(
+            padding: _normalizedSafePadding(mediaQuery),
+          );
+
+          return MediaQuery(
+            data: normalizedMediaQuery,
+            child: child ?? const SizedBox.shrink(),
+          );
+        },
         theme: ThemeData(
           colorScheme: lightScheme,
           useMaterial3: true,
@@ -186,114 +231,133 @@ class MediaTubeSplashScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final textTheme = Theme.of(context).textTheme;
+    final viewPadding = MediaQuery.viewPaddingOf(context);
 
     return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: [
-              Color(0xFF080808),
-              Color(0xFF151515),
-              Color(0xFF2A0000),
-            ],
-            stops: [0.0, 0.58, 1.0],
+      body: SizedBox.expand(
+        child: DecoratedBox(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Color(0xFF080808),
+                Color(0xFF151515),
+                Color(0xFF2A0000),
+              ],
+              stops: [0.0, 0.58, 1.0],
+            ),
           ),
-        ),
-        child: Stack(
-          children: [
-            Positioned(
-              top: -64,
-              right: -38,
-              child: Container(
-                width: 220,
-                height: 220,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.red.withAlpha(28),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              Positioned(
+                top: -64,
+                right: -38,
+                child: Container(
+                  width: 220,
+                  height: 220,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.red.withAlpha(28),
+                  ),
                 ),
               ),
-            ),
-            Positioned(
-              bottom: -74,
-              left: -34,
-              child: Container(
-                width: 240,
-                height: 240,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Colors.white.withAlpha(16),
+              Positioned(
+                bottom: -74,
+                left: -34,
+                child: Container(
+                  width: 240,
+                  height: 240,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.white.withAlpha(16),
+                  ),
                 ),
               ),
-            ),
-            SafeArea(
-              child: Column(
-                children: [
-                  const Spacer(flex: 2),
-                  TweenAnimationBuilder<double>(
-                    tween: Tween<double>(begin: 0.9, end: 1),
-                    duration: const Duration(milliseconds: 900),
-                    curve: Curves.easeOutBack,
-                    builder: (context, scale, child) => Transform.scale(
-                      scale: scale,
-                      child: child,
-                    ),
-                    child: Container(
-                      width: 124,
-                      height: 124,
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(36),
-                        boxShadow: const [
-                          BoxShadow(
-                            color: Color(0x66FF0000),
-                            blurRadius: 24,
-                            spreadRadius: 2,
+              Padding(
+                padding: EdgeInsets.fromLTRB(
+                  24,
+                  viewPadding.top + 20,
+                  24,
+                  viewPadding.bottom + 20,
+                ),
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    final compact = constraints.maxHeight < 640;
+                    final tileSize = compact ? 104.0 : 124.0;
+                    final tileRadius = compact ? 30.0 : 36.0;
+                    final tilePadding = compact ? 14.0 : 16.0;
+                    final titleGap = compact ? 14.0 : 20.0;
+
+                    return Column(
+                      children: [
+                        const Spacer(flex: 2),
+                        TweenAnimationBuilder<double>(
+                          tween: Tween<double>(begin: 0.9, end: 1),
+                          duration: const Duration(milliseconds: 900),
+                          curve: Curves.easeOutBack,
+                          builder: (context, scale, child) => Transform.scale(
+                            scale: scale,
+                            child: child,
                           ),
-                        ],
-                      ),
-                      child: Image.asset(
-                        'assets/icon.png',
-                        fit: BoxFit.contain,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  Text(
-                    'MediaTube',
-                    style: textTheme.headlineSmall?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: 0.4,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Fast media browsing and capture',
-                    style: textTheme.bodyMedium?.copyWith(
-                      color: Colors.white.withAlpha(190),
-                      letterSpacing: 0.2,
-                    ),
-                  ),
-                  const Spacer(flex: 3),
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 20),
-                    child: Text(
-                      'Developed By Rajesh Biswas',
-                      textAlign: TextAlign.center,
-                      style: textTheme.bodyMedium?.copyWith(
-                        color: Colors.white.withAlpha(180),
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: 0.6,
-                      ),
-                    ),
-                  ),
-                ],
+                          child: Container(
+                            width: tileSize,
+                            height: tileSize,
+                            padding: EdgeInsets.all(tilePadding),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(tileRadius),
+                              boxShadow: const [
+                                BoxShadow(
+                                  color: Color(0x66FF0000),
+                                  blurRadius: 24,
+                                  spreadRadius: 2,
+                                ),
+                              ],
+                            ),
+                            child: Image.asset(
+                              'assets/icon.png',
+                              fit: BoxFit.contain,
+                            ),
+                          ),
+                        ),
+                        SizedBox(height: titleGap),
+                        Text(
+                          'MediaTube',
+                          textAlign: TextAlign.center,
+                          style: textTheme.headlineSmall?.copyWith(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.4,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Fast media browsing and capture',
+                          textAlign: TextAlign.center,
+                          style: textTheme.bodyMedium?.copyWith(
+                            color: Colors.white.withAlpha(190),
+                            letterSpacing: 0.2,
+                          ),
+                        ),
+                        const Spacer(flex: 3),
+                        Text(
+                          'Developed By Rajesh Biswas',
+                          textAlign: TextAlign.center,
+                          style: textTheme.bodyMedium?.copyWith(
+                            color: Colors.white.withAlpha(180),
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: 0.6,
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -311,6 +375,10 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
     with WidgetsBindingObserver {
   bool _permissionsGranted = false;
   bool _updateCheckDone = false;
+  DateTime _lastOpenUpdateCheckAt = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _isOpenUpdateCheckRunning = false;
+
+  static const Duration _openUpdateCheckCooldown = Duration(seconds: 20);
 
   @override
   void initState() {
@@ -344,6 +412,33 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
       }
     } else if (state == AppLifecycleState.resumed) {
       _hasSavedOnPause = false;
+      unawaited(_triggerOpenUpdateCheck());
+    }
+  }
+
+  Future<void> _triggerOpenUpdateCheck({bool force = false}) async {
+    if (!mounted || !_permissionsGranted) {
+      return;
+    }
+
+    final now = DateTime.now();
+    final shouldThrottle =
+        !force &&
+        now.difference(_lastOpenUpdateCheckAt) < _openUpdateCheckCooldown;
+
+    if (_isOpenUpdateCheckRunning || shouldThrottle) {
+      return;
+    }
+
+    _isOpenUpdateCheckRunning = true;
+    _lastOpenUpdateCheckAt = now;
+
+    try {
+      await UpdateManager().checkForUpdates(context);
+    } catch (e) {
+      debugPrint('Open update check failed: $e');
+    } finally {
+      _isOpenUpdateCheckRunning = false;
     }
   }
 
@@ -667,10 +762,7 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
 
       // 2. Check for Updates - Network call (slow)
       if (mounted) {
-        // Run completely in background, don't await result to avoid blocking
-        UpdateManager().checkForUpdates(context).catchError((e) {
-          debugPrint("Update check background error: $e");
-        });
+        unawaited(_triggerOpenUpdateCheck(force: true));
       }
     } catch (e) {
       debugPrint("Startup check error: $e");
@@ -686,39 +778,41 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
   Widget build(BuildContext context) {
     if (!_permissionsGranted) {
       return Scaffold(
-        body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(32),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Icon(Icons.folder_off, size: 64, color: Colors.grey),
-                const SizedBox(height: 16),
-                const Text(
-                  'Storage Permission Required',
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'MediaTube needs storage permission to download and save media files.',
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 24),
-                FilledButton.icon(
-                  onPressed: _requestPermissions,
-                  icon: const Icon(Icons.folder),
-                  label: const Text('Grant Permission'),
-                ),
-                const SizedBox(height: 8),
-                TextButton(
-                  onPressed: () {
-                    setState(() {
-                      _permissionsGranted = true;
-                    });
-                  },
-                  child: const Text('Continue Anyway'),
-                ),
-              ],
+        body: SafeArea(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.folder_off, size: 64, color: Colors.grey),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Storage Permission Required',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'MediaTube needs storage permission to download and save media files.',
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 24),
+                  FilledButton.icon(
+                    onPressed: _requestPermissions,
+                    icon: const Icon(Icons.folder),
+                    label: const Text('Grant Permission'),
+                  ),
+                  const SizedBox(height: 8),
+                  TextButton(
+                    onPressed: () {
+                      setState(() {
+                        _permissionsGranted = true;
+                      });
+                    },
+                    child: const Text('Continue Anyway'),
+                  ),
+                ],
+              ),
             ),
           ),
         ),

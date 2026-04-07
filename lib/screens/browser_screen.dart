@@ -1,13 +1,19 @@
 import 'dart:async';
+import 'dart:collection';
+import 'dart:math' as math;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/providers.dart';
 import '../services/services.dart';
 import '../utils/utils.dart';
 import '../widgets/widgets.dart';
 import 'downloads_screen.dart';
+import 'settings_screen.dart';
 
 class BrowserScreen extends StatefulWidget {
   const BrowserScreen({super.key});
@@ -17,7 +23,42 @@ class BrowserScreen extends StatefulWidget {
 }
 
 class _BrowserScreenState extends State<BrowserScreen>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, TickerProviderStateMixin {
+  static const String _youtubeHomeUrl = 'https://m.youtube.com';
+  static const String _youtubeVisibilityBypassScript = r'''
+    (() => {
+      const stopVisibilityEvent = (event) => {
+        event.stopImmediatePropagation();
+      };
+
+      try {
+        Object.defineProperty(document, 'visibilityState', {
+          get: () => 'visible',
+          configurable: true,
+        });
+      } catch (_) {}
+
+      try {
+        Object.defineProperty(document, 'hidden', {
+          get: () => false,
+          configurable: true,
+        });
+      } catch (_) {}
+
+      document.addEventListener('visibilitychange', stopVisibilityEvent, true);
+      document.addEventListener('webkitvisibilitychange', stopVisibilityEvent, true);
+    })();
+  ''';
+  static const double _omniFabSize = 58;
+  static const double _streamFabSize = 42;
+  static const double _omniActionWidth = 146;
+  static const double _omniActionHeight = 42;
+
+  static const String _omniFabXPrefKey = 'overlay.omni_fab.x';
+  static const String _omniFabYPrefKey = 'overlay.omni_fab.y';
+  static const String _streamFabXPrefKey = 'overlay.stream_fab.x';
+  static const String _streamFabYPrefKey = 'overlay.stream_fab.y';
+
   InAppWebViewController? _webViewController;
   final TextEditingController _urlController = TextEditingController();
   final FocusNode _urlFocusNode = FocusNode();
@@ -26,9 +67,6 @@ class _BrowserScreenState extends State<BrowserScreen>
   String _currentUrl = 'https://m.youtube.com';
   bool _showHomePage = false;
 
-  // Track if WebView has ever been created (to avoid recreating it)
-  bool _webViewEverCreated = true;
-
   // Flag to track if current session is from Share-to-Download
   bool _isShareToDownload = false;
 
@@ -36,6 +74,28 @@ class _BrowserScreenState extends State<BrowserScreen>
   BrowserProvider? _browserProviderRef;
   bool _isProcessingPendingUrl = false;
   bool _requestInterceptionEnabled = false;
+  bool _isOmniMenuExpanded = false;
+  bool _isStreamPulseActive = false;
+  bool _keepAlivePlaybackScriptInjected = false;
+
+  Offset _omniFabNormalized = const Offset(0.84, 0.78);
+  Offset _streamFabNormalized = const Offset(0.88, 0.60);
+
+  Timer? _backgroundPlaybackTimer;
+  Timer? _fabPersistDebounce;
+  bool _backgroundPlaybackAutomationInProgress = false;
+  int _backgroundPlaybackAutomationEpoch = 0;
+
+  final BackgroundDownloadService _backgroundService =
+      BackgroundDownloadService();
+  bool _playbackForegroundProtectionEnabled = false;
+
+  int _profileFrameSampleCount = 0;
+  int _profileJankyFrameCount = 0;
+  DateTime _lastFrameProfileLogAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  late final AnimationController _omniMenuController;
+  late final AnimationController _streamPulseController;
 
   bool _shouldEnableRequestInterception(BrowserProvider provider) {
     return provider.shouldObserveNetworkMedia;
@@ -71,6 +131,17 @@ class _BrowserScreenState extends State<BrowserScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _attachFrameTimingProbe();
+    _omniMenuController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 280),
+    );
+    _streamPulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    );
+    unawaited(_loadFloatingButtonPositions());
+
     _urlController.text = _currentUrl;
 
     // Set up reactive listener for share-to-download intents
@@ -84,31 +155,329 @@ class _BrowserScreenState extends State<BrowserScreen>
       _browserProviderRef!.addListener(_checkAndProcessPendingUrl);
       // Check immediately in case a URL was set before listener attached
       _checkAndProcessPendingUrl();
-
-      // Preload WebView after a short delay to prevent UI freeze
-      Future.delayed(const Duration(milliseconds: 500), () {
-        if (mounted && !_webViewEverCreated) {
-          setState(() {
-            _webViewEverCreated = true;
-          });
-        }
-      });
     });
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _detachFrameTimingProbe();
     _browserProviderRef?.removeListener(_checkAndProcessPendingUrl);
+    _stopBackgroundPlaybackAutomationLoop();
+    unawaited(_stopPlaybackForegroundProtection());
+    _fabPersistDebounce?.cancel();
+    _chromeAutoHideTimer?.cancel();
+    _omniMenuController.dispose();
+    _streamPulseController.dispose();
     _urlController.dispose();
     _urlFocusNode.dispose();
     super.dispose();
   }
 
+  void _attachFrameTimingProbe() {
+    if (!kDebugMode) {
+      return;
+    }
+    SchedulerBinding.instance.addTimingsCallback(_handleFrameTimings);
+  }
+
+  void _detachFrameTimingProbe() {
+    if (!kDebugMode) {
+      return;
+    }
+    SchedulerBinding.instance.removeTimingsCallback(_handleFrameTimings);
+  }
+
+  void _handleFrameTimings(List<FrameTiming> timings) {
+    if (!kDebugMode || timings.isEmpty) {
+      return;
+    }
+
+    var worstTotalMs = 0.0;
+    var worstBuildMs = 0.0;
+    var worstRasterMs = 0.0;
+
+    for (final timing in timings) {
+      final totalMs = timing.totalSpan.inMicroseconds / 1000;
+      final buildMs = timing.buildDuration.inMicroseconds / 1000;
+      final rasterMs = timing.rasterDuration.inMicroseconds / 1000;
+
+      worstTotalMs = math.max(worstTotalMs, totalMs);
+      worstBuildMs = math.max(worstBuildMs, buildMs);
+      worstRasterMs = math.max(worstRasterMs, rasterMs);
+
+      _profileFrameSampleCount++;
+      if (totalMs > 16.6) {
+        _profileJankyFrameCount++;
+      }
+    }
+
+    final now = DateTime.now();
+    if (now.difference(_lastFrameProfileLogAt) < const Duration(seconds: 6) ||
+        _profileFrameSampleCount < 20) {
+      return;
+    }
+
+    final jankPercent =
+        (_profileJankyFrameCount * 100) / _profileFrameSampleCount;
+
+    if (jankPercent >= 12) {
+      AppLogger.warning(
+        'UI jank sample ${jankPercent.toStringAsFixed(1)}% '
+        '($_profileJankyFrameCount/$_profileFrameSampleCount), '
+        'worst frame ${worstTotalMs.toStringAsFixed(1)}ms '
+        '[build ${worstBuildMs.toStringAsFixed(1)}ms, '
+        'raster ${worstRasterMs.toStringAsFixed(1)}ms]',
+      );
+    }
+
+    _profileFrameSampleCount = 0;
+    _profileJankyFrameCount = 0;
+    _lastFrameProfileLogAt = now;
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden) {
+      unawaited(
+        _activateBackgroundPlaybackAutomation(usePlaybackDelay: true),
+      );
+      return;
+    }
+
     if (state == AppLifecycleState.resumed) {
+      _stopBackgroundPlaybackAutomationLoop();
+      unawaited(_stopPlaybackForegroundProtection());
+      unawaited(_forceCurrentVideoPlayback());
       _checkClipboardForMedia();
+      return;
+    }
+
+    if (state == AppLifecycleState.detached) {
+      _stopBackgroundPlaybackAutomationLoop();
+      unawaited(_stopPlaybackForegroundProtection());
+    }
+  }
+
+  Future<void> _activateBackgroundPlaybackAutomation({
+    bool usePlaybackDelay = false,
+  }) async {
+    if (_backgroundPlaybackAutomationInProgress) {
+      return;
+    }
+
+    _backgroundPlaybackAutomationInProgress = true;
+    final epoch = ++_backgroundPlaybackAutomationEpoch;
+
+    try {
+      await _injectPlaybackKeepAliveScript();
+      if (!mounted || epoch != _backgroundPlaybackAutomationEpoch) {
+        return;
+      }
+
+      await _forceCurrentVideoPlayback(delayMs: usePlaybackDelay ? 300 : 0);
+      if (!mounted || epoch != _backgroundPlaybackAutomationEpoch) {
+        return;
+      }
+
+      await _syncPlaybackForegroundProtection();
+      if (!mounted || epoch != _backgroundPlaybackAutomationEpoch) {
+        return;
+      }
+
+      _backgroundPlaybackTimer?.cancel();
+      _backgroundPlaybackTimer = Timer.periodic(
+        const Duration(seconds: 2),
+        (timer) {
+          if (!mounted || epoch != _backgroundPlaybackAutomationEpoch) {
+            timer.cancel();
+            return;
+          }
+
+          unawaited(() async {
+            await _forceCurrentVideoPlayback(delayMs: 300);
+            await _syncPlaybackForegroundProtection();
+          }());
+        },
+      );
+    } finally {
+      _backgroundPlaybackAutomationInProgress = false;
+    }
+  }
+
+  void _stopBackgroundPlaybackAutomationLoop() {
+    _backgroundPlaybackAutomationEpoch++;
+    _backgroundPlaybackTimer?.cancel();
+    _backgroundPlaybackTimer = null;
+    _backgroundPlaybackAutomationInProgress = false;
+  }
+
+  Future<void> _syncPlaybackForegroundProtection() async {
+    final controller = _webViewController;
+    if (controller == null) {
+      await _stopPlaybackForegroundProtection();
+      return;
+    }
+
+    try {
+      final result = await controller.evaluateJavascript(
+        source: '''
+          (() => {
+            const videos = Array.from(document.querySelectorAll('video'));
+            const hasVideo = videos.length > 0;
+            const isPlaying = videos.some((video) => !video.paused && !video.ended);
+            const title = (document.title || 'MediaTube').trim();
+            return [title, hasVideo, isPlaying];
+          })();
+        ''',
+      );
+
+      var title = 'MediaTube';
+      var shouldProtect = false;
+
+      if (result is List && result.length >= 3) {
+        final rawTitle = result[0]?.toString().trim() ?? '';
+        final hasVideo = result[1] == true || result[1]?.toString() == 'true';
+        final isPlaying = result[2] == true || result[2]?.toString() == 'true';
+
+        title = rawTitle.isEmpty ? title : rawTitle;
+        shouldProtect = hasVideo && isPlaying;
+      }
+
+      if (shouldProtect) {
+        await _backgroundService.startPlaybackService(title: title, isVideo: true);
+        _playbackForegroundProtectionEnabled = true;
+        return;
+      }
+
+      await _stopPlaybackForegroundProtection();
+    } catch (e) {
+      debugPrint('Playback foreground protection sync failed: $e');
+    }
+  }
+
+  Future<void> _stopPlaybackForegroundProtection() async {
+    if (!_playbackForegroundProtectionEnabled) {
+      return;
+    }
+
+    try {
+      await _backgroundService.stopPlaybackService();
+    } catch (e) {
+      debugPrint('Failed to stop playback foreground protection: $e');
+    } finally {
+      _playbackForegroundProtectionEnabled = false;
+    }
+  }
+
+  Future<void> _injectPlaybackKeepAliveScript() async {
+    final controller = _webViewController;
+    if (controller == null || _keepAlivePlaybackScriptInjected) {
+      return;
+    }
+
+    try {
+      await controller.evaluateJavascript(
+        source: '''
+          (() => {
+            if (window.__mediaTubeKeepAliveHooked) {
+              return true;
+            }
+
+            window.__mediaTubeKeepAliveHooked = true;
+
+            const keepPlaying = () => {
+              const videos = Array.from(document.querySelectorAll('video'));
+              videos.forEach((video) => {
+                try {
+                  video.setAttribute('playsinline', 'true');
+                  video.setAttribute('webkit-playsinline', 'true');
+                  video.autoplay = true;
+                  video.muted = false;
+                  const playPromise = video.play();
+                  if (playPromise && typeof playPromise.catch === 'function') {
+                    playPromise.catch(() => {});
+                  }
+                } catch (_) {}
+              });
+            };
+
+            ['visibilitychange', 'focus', 'pageshow', 'resume'].forEach((eventName) => {
+              try {
+                window.addEventListener(eventName, keepPlaying, { passive: true });
+              } catch (_) {}
+              try {
+                document.addEventListener(eventName, keepPlaying, { passive: true });
+              } catch (_) {}
+            });
+
+            setInterval(() => {
+              if (document.hidden) {
+                keepPlaying();
+              }
+            }, 1800);
+
+            keepPlaying();
+            return true;
+          })();
+        ''',
+      );
+      _keepAlivePlaybackScriptInjected = true;
+    } catch (e) {
+      debugPrint('Background keep-alive injection failed: $e');
+    }
+  }
+
+  Future<void> _forceCurrentVideoPlayback({int delayMs = 0}) async {
+    final controller = _webViewController;
+    if (controller == null) {
+      return;
+    }
+
+    final effectiveDelayMs = delayMs < 0 ? 0 : delayMs;
+
+    try {
+      await controller.evaluateJavascript(
+        source: '''
+          (() => {
+            const delayMs = $effectiveDelayMs;
+
+            const forcePlay = () => {
+              const videos = Array.from(document.querySelectorAll('video'));
+              if (!videos.length) {
+                return 0;
+              }
+
+              videos.forEach((video) => {
+                try {
+                  video.setAttribute('playsinline', 'true');
+                  video.setAttribute('webkit-playsinline', 'true');
+                  video.autoplay = true;
+                  const playPromise = video.play();
+                  if (playPromise && typeof playPromise.catch === 'function') {
+                    playPromise.catch(() => {});
+                  }
+                } catch (_) {}
+              });
+
+              return videos.length;
+            };
+
+            if (delayMs > 0) {
+              setTimeout(forcePlay, delayMs);
+              return 0;
+            }
+
+            return forcePlay();
+          })();
+        ''',
+      );
+    } catch (e) {
+      debugPrint('Background playback trigger failed: $e');
     }
   }
 
@@ -272,7 +641,57 @@ class _BrowserScreenState extends State<BrowserScreen>
 
   bool _isWebViewReady = false; // Tracks if WebView is fully created
   bool _isUrlBarVisible = false;
-  int _lastScrollY = 0;
+  bool _isChromeVisible = true;
+  Timer? _chromeAutoHideTimer;
+
+  void _scheduleChromeAutoHide({
+    Duration delay = const Duration(seconds: 3),
+  }) {
+    _chromeAutoHideTimer?.cancel();
+
+    if (_showHomePage || _isUrlBarVisible) {
+      return;
+    }
+
+    _chromeAutoHideTimer = Timer(delay, () {
+      if (!mounted || _showHomePage || _isUrlBarVisible) {
+        return;
+      }
+      if (_isChromeVisible) {
+        setState(() {
+          _isChromeVisible = false;
+        });
+      }
+    });
+  }
+
+  void _showChrome({bool keepVisible = false}) {
+    if (!_isChromeVisible) {
+      setState(() {
+        _isChromeVisible = true;
+      });
+    }
+
+    if (!keepVisible) {
+      _scheduleChromeAutoHide();
+    }
+  }
+
+  void _toggleUrlBarVisibility() {
+    final next = !_isUrlBarVisible;
+    setState(() {
+      _isUrlBarVisible = next;
+      _isChromeVisible = true;
+    });
+
+    if (next) {
+      _chromeAutoHideTimer?.cancel();
+      _urlFocusNode.requestFocus();
+    } else {
+      _urlFocusNode.unfocus();
+      _scheduleChromeAutoHide();
+    }
+  }
 
   void _loadUrl(String url) {
     if (url.isEmpty) return;
@@ -288,104 +707,933 @@ class _BrowserScreenState extends State<BrowserScreen>
 
     _currentUrl = normalizedUrl;
 
-    if (_showHomePage) {
-      // 1. IMMEDIATE UI UPDATE: Switch to WebView mode
-      setState(() {
-        _showHomePage = false;
-        _webViewEverCreated = true;
-      });
-
-      // 2. DEFERRED LOAD: Allow the UI to render the WebView container first
-      // This prevents the "freeze" because the main thread isn't blocked by generic initialization
-      Future.delayed(const Duration(milliseconds: 100), () {
-        if (_isWebViewReady && mounted) {
-          _webViewController?.loadUrl(
-            urlRequest: URLRequest(url: WebUri(normalizedUrl)),
-          );
-        }
-      });
-    } else if (_isWebViewReady) {
-      // WebView already exists and is ready
+    if (_isWebViewReady) {
       _webViewController?.loadUrl(
         urlRequest: URLRequest(url: WebUri(normalizedUrl)),
       );
     }
-    // If WebView is being created but not ready yet, _currentUrl is already
-    // set and will be used as initialUrlRequest
-
-    _urlFocusNode.unfocus();
   }
 
   @override
   Widget build(BuildContext context) {
     // pendingUrl is now handled reactively via _checkAndProcessPendingUrl listener
-
     return Scaffold(
-      bottomNavigationBar: Selector<
-        BrowserProvider,
-        ({bool canGoBack, bool canGoForward, bool isLoading})
-      >(
-        selector: (_, provider) => (
-          canGoBack: provider.canGoBack,
-          canGoForward: provider.canGoForward,
-          isLoading: provider.isLoading,
-        ),
-        builder: (context, navState, _) => _buildNavigationBar(
-          canGoBack: navState.canGoBack,
-          canGoForward: navState.canGoForward,
-          isLoading: navState.isLoading,
-        ),
-      ),
-      body: Stack(
-        children: [
-          // Main content
-          SafeArea(
-            child: Column(
-              children: [
-                // URL Bar (hide when showing home)
-                if (!_showHomePage)
-                  AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    height: _isUrlBarVisible ? 64.0 : 0.0,
-                    child: SingleChildScrollView(
-                      physics: const NeverScrollableScrollPhysics(),
-                      child: Selector<
-                        BrowserProvider,
-                        ({String currentUrl, int tabCount})
-                      >(
-                        selector: (_, provider) => (
-                          currentUrl: provider.currentUrl,
-                          tabCount: provider.tabs.length,
-                        ),
-                        builder: (context, data, _) => _buildUrlBar(
-                          currentUrl: data.currentUrl,
-                          tabCount: data.tabCount,
-                        ),
-                      ),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final viewport = Size(constraints.maxWidth, constraints.maxHeight);
+          final safePadding = MediaQuery.viewPaddingOf(context);
+          final omniFabAbsolute = _normalizedToAbsolute(
+            _omniFabNormalized,
+            viewport,
+            safePadding,
+            _omniFabSize,
+          );
+
+          return Stack(
+            children: [
+              Positioned.fill(child: _buildWebView()),
+              if (_isOmniMenuExpanded || _omniMenuController.value > 0)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    ignoring: !_isOmniMenuExpanded,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: _collapseOmniMenu,
+                      child: const SizedBox.expand(),
                     ),
                   ),
-
-                // Content area
-                Expanded(
-                  child: Stack(
-                    children: [
-                      // Keep WebView alive but hidden when on home
-                      if (_webViewEverCreated)
-                        Offstage(
-                          offstage: _showHomePage,
-                          child: _buildWebView(),
-                        ),
-                      // Home screen overlay
-                      if (_showHomePage) HomeScreen(onNavigate: _loadUrl),
-                    ],
-                  ),
                 ),
-              ],
-            ),
-          ),
-        ],
+              ..._buildOmniMenuActions(
+                anchor: omniFabAbsolute,
+                viewport: viewport,
+                safePadding: safePadding,
+              ),
+              _buildDraggableOmniFab(
+                position: omniFabAbsolute,
+                viewport: viewport,
+                safePadding: safePadding,
+              ),
+              Selector<
+                BrowserProvider,
+                ({
+                  bool hasDetectedMedia,
+                  bool isYouTubePage,
+                  bool hasFetchError,
+                  bool isFetchingMedia,
+                })
+              >(
+                selector: (_, provider) => (
+                  hasDetectedMedia: provider.hasDetectedMedia,
+                  isYouTubePage: provider.isYouTubePage,
+                  hasFetchError: provider.hasFetchError,
+                  isFetchingMedia: provider.isFetchingMedia,
+                ),
+                builder: (context, streamState, _) {
+                  _syncStreamPulseState(streamState.hasDetectedMedia);
+
+                  final streamFabAbsolute = _normalizedToAbsolute(
+                    _streamFabNormalized,
+                    viewport,
+                    safePadding,
+                    _streamFabSize,
+                  );
+
+                  return _buildDraggableStreamFab(
+                    position: streamFabAbsolute,
+                    viewport: viewport,
+                    safePadding: safePadding,
+                    hasDetectedMedia: streamState.hasDetectedMedia,
+                    isYouTubePage: streamState.isYouTubePage,
+                    hasFetchError: streamState.hasFetchError,
+                    isFetchingMedia: streamState.isFetchingMedia,
+                  );
+                },
+              ),
+            ],
+          );
+        },
       ),
     );
+  }
+
+  Widget _buildDraggableOmniFab({
+    required Offset position,
+    required Size viewport,
+    required EdgeInsets safePadding,
+  }) {
+    return Positioned(
+      left: position.dx,
+      top: position.dy,
+      child: GestureDetector(
+        onTap: _toggleOmniMenu,
+        onPanStart: (_) {
+          if (_isOmniMenuExpanded) {
+            _collapseOmniMenu();
+          }
+        },
+        onPanUpdate: (details) => _onOmniFabDragged(
+          details,
+          viewport,
+          safePadding,
+        ),
+        onPanEnd: (_) => _persistFloatingButtonPositions(),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 180),
+          width: _omniFabSize,
+          height: _omniFabSize,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xFFFF2D2D), Color(0xFFE50914)],
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withAlpha(90),
+                blurRadius: 12,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Icon(
+            _isOmniMenuExpanded ? Icons.close_rounded : Icons.menu_rounded,
+            color: Colors.white,
+            size: 30,
+          ),
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _buildOmniMenuActions({
+    required Offset anchor,
+    required Size viewport,
+    required EdgeInsets safePadding,
+  }) {
+    if (!_isOmniMenuExpanded && _omniMenuController.value <= 0) {
+      return const <Widget>[];
+    }
+
+    final actions = <_OmniMenuAction>[
+      _OmniMenuAction(
+        icon: Icons.download_rounded,
+        label: 'Downloads',
+        onTap: () => _openDownloadsScreen(context),
+      ),
+      _OmniMenuAction(
+        icon: Icons.settings_rounded,
+        label: 'Settings',
+        onTap: () => _openSettingsScreen(context),
+      ),
+      _OmniMenuAction(
+        icon: Icons.refresh_rounded,
+        label: 'Refresh',
+        onTap: () => _webViewController?.reload(),
+      ),
+      _OmniMenuAction(
+        icon: Icons.home_rounded,
+        label: 'Home',
+        onTap: () => _loadUrl(_youtubeHomeUrl),
+      ),
+    ];
+
+    final expandsDownward = anchor.dy < safePadding.top + 190;
+    final baseTop = anchor.dy + (_omniFabSize - _omniActionHeight) / 2;
+    final baseLeft = (anchor.dx + (_omniFabSize - _omniActionWidth) / 2)
+        .clamp(
+          safePadding.left + 8,
+          viewport.width - safePadding.right - _omniActionWidth - 8,
+        )
+        .toDouble();
+
+    final items = <Widget>[];
+
+    for (var i = 0; i < actions.length; i++) {
+      final step = (i + 1) * (_omniActionHeight + 10);
+      final rawTargetTop = expandsDownward
+          ? baseTop + step
+          : baseTop - step;
+      final targetTop = rawTargetTop
+          .clamp(
+            safePadding.top + 8,
+            viewport.height - safePadding.bottom - _omniActionHeight - 8,
+          )
+          .toDouble();
+
+      final intervalStart = (i * 0.1).clamp(0.0, 0.6).toDouble();
+      final itemAnimation = CurvedAnimation(
+        parent: _omniMenuController,
+        curve: Interval(
+          intervalStart,
+          1,
+          curve: Curves.easeOutBack,
+        ),
+      );
+
+      items.add(
+        AnimatedBuilder(
+          animation: itemAnimation,
+          builder: (context, child) {
+            final t = itemAnimation.value;
+            final animatedTop = baseTop + (targetTop - baseTop) * t;
+            return Positioned(
+              left: baseLeft,
+              top: animatedTop,
+              child: Opacity(
+                opacity: t,
+                child: Transform.scale(
+                  scale: 0.85 + (0.15 * t),
+                  child: IgnorePointer(
+                    ignoring: t < 0.95,
+                    child: child,
+                  ),
+                ),
+              ),
+            );
+          },
+          child: _buildOmniActionChip(actions[i]),
+        ),
+      );
+    }
+
+    return items;
+  }
+
+  Widget _buildOmniActionChip(_OmniMenuAction action) {
+    final theme = Theme.of(context);
+    return Material(
+      color: theme.colorScheme.surface.withAlpha(245),
+      elevation: 8,
+      borderRadius: BorderRadius.circular(24),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(24),
+        onTap: () {
+          _collapseOmniMenu();
+          action.onTap();
+        },
+        child: SizedBox(
+          width: _omniActionWidth,
+          height: _omniActionHeight,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(action.icon, size: 20),
+              const SizedBox(width: 8),
+              Text(
+                action.label,
+                style: theme.textTheme.labelLarge?.copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _toggleOmniMenu() {
+    if (_isOmniMenuExpanded) {
+      _collapseOmniMenu();
+      return;
+    }
+
+    setState(() {
+      _isOmniMenuExpanded = true;
+    });
+    _omniMenuController.forward(from: 0);
+  }
+
+  void _collapseOmniMenu() {
+    if (!_isOmniMenuExpanded && _omniMenuController.value <= 0) {
+      return;
+    }
+
+    setState(() {
+      _isOmniMenuExpanded = false;
+    });
+    _omniMenuController.reverse();
+  }
+
+  void _onOmniFabDragged(
+    DragUpdateDetails details,
+    Size viewport,
+    EdgeInsets safePadding,
+  ) {
+    final currentAbsolute = _normalizedToAbsolute(
+      _omniFabNormalized,
+      viewport,
+      safePadding,
+      _omniFabSize,
+    );
+    final nextAbsolute = _clampAbsoluteOffset(
+      currentAbsolute + details.delta,
+      viewport,
+      safePadding,
+      _omniFabSize,
+    );
+
+    setState(() {
+      _omniFabNormalized = _absoluteToNormalized(
+        nextAbsolute,
+        viewport,
+        safePadding,
+        _omniFabSize,
+      );
+    });
+  }
+
+  Future<void> _loadFloatingButtonPositions() async {
+    final prefs = await SharedPreferences.getInstance();
+    final omniX = prefs.getDouble(_omniFabXPrefKey);
+    final omniY = prefs.getDouble(_omniFabYPrefKey);
+    final streamX = prefs.getDouble(_streamFabXPrefKey);
+    final streamY = prefs.getDouble(_streamFabYPrefKey);
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      if (omniX != null && omniY != null) {
+        _omniFabNormalized = Offset(
+          omniX.clamp(0.0, 1.0).toDouble(),
+          omniY.clamp(0.0, 1.0).toDouble(),
+        );
+      }
+
+      if (streamX != null && streamY != null) {
+        _streamFabNormalized = Offset(
+          streamX.clamp(0.0, 1.0).toDouble(),
+          streamY.clamp(0.0, 1.0).toDouble(),
+        );
+      }
+    });
+  }
+
+  void _persistFloatingButtonPositions() {
+    _fabPersistDebounce?.cancel();
+    _fabPersistDebounce = Timer(const Duration(milliseconds: 120), () {
+      unawaited(_saveFloatingButtonPositions());
+    });
+  }
+
+  Future<void> _saveFloatingButtonPositions() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_omniFabXPrefKey, _omniFabNormalized.dx);
+    await prefs.setDouble(_omniFabYPrefKey, _omniFabNormalized.dy);
+    await prefs.setDouble(_streamFabXPrefKey, _streamFabNormalized.dx);
+    await prefs.setDouble(_streamFabYPrefKey, _streamFabNormalized.dy);
+  }
+
+  Offset _normalizedToAbsolute(
+    Offset normalized,
+    Size viewport,
+    EdgeInsets safePadding,
+    double controlSize,
+  ) {
+    final usableWidth = math.max(
+      1.0,
+      viewport.width - safePadding.horizontal - controlSize - 16,
+    );
+    final usableHeight = math.max(
+      1.0,
+      viewport.height - safePadding.vertical - controlSize - 16,
+    );
+
+    final x = safePadding.left + 8 + normalized.dx.clamp(0.0, 1.0) * usableWidth;
+    final y = safePadding.top + 8 + normalized.dy.clamp(0.0, 1.0) * usableHeight;
+    return Offset(x.toDouble(), y.toDouble());
+  }
+
+  Offset _absoluteToNormalized(
+    Offset absolute,
+    Size viewport,
+    EdgeInsets safePadding,
+    double controlSize,
+  ) {
+    final usableWidth = math.max(
+      1.0,
+      viewport.width - safePadding.horizontal - controlSize - 16,
+    );
+    final usableHeight = math.max(
+      1.0,
+      viewport.height - safePadding.vertical - controlSize - 16,
+    );
+
+    final nx = ((absolute.dx - safePadding.left - 8) / usableWidth)
+        .clamp(0.0, 1.0)
+        .toDouble();
+    final ny = ((absolute.dy - safePadding.top - 8) / usableHeight)
+        .clamp(0.0, 1.0)
+        .toDouble();
+    return Offset(nx, ny);
+  }
+
+  Offset _clampAbsoluteOffset(
+    Offset absolute,
+    Size viewport,
+    EdgeInsets safePadding,
+    double controlSize,
+  ) {
+    final minX = safePadding.left + 8;
+    final minY = safePadding.top + 8;
+    final maxX = math.max(
+      minX,
+      viewport.width - safePadding.right - controlSize - 8,
+    );
+    final maxY = math.max(
+      minY,
+      viewport.height - safePadding.bottom - controlSize - 8,
+    );
+
+    return Offset(
+      absolute.dx.clamp(minX, maxX).toDouble(),
+      absolute.dy.clamp(minY, maxY).toDouble(),
+    );
+  }
+
+  void _syncStreamPulseState(bool shouldPulse) {
+    if (_isStreamPulseActive == shouldPulse) {
+      return;
+    }
+
+    _isStreamPulseActive = shouldPulse;
+
+    if (shouldPulse) {
+      _streamPulseController.repeat(reverse: true);
+      return;
+    }
+
+    _streamPulseController.stop();
+    _streamPulseController.value = 0;
+  }
+
+  Widget _buildDraggableStreamFab({
+    required Offset position,
+    required Size viewport,
+    required EdgeInsets safePadding,
+    required bool hasDetectedMedia,
+    required bool isYouTubePage,
+    required bool hasFetchError,
+    required bool isFetchingMedia,
+  }) {
+    final theme = Theme.of(context);
+    final baseColor = isFetchingMedia
+        ? Colors.orange
+        : hasDetectedMedia
+        ? Colors.green.shade600
+        : hasFetchError
+        ? Colors.orange.shade700
+        : isYouTubePage
+        ? const Color(0xFFE50914)
+        : theme.colorScheme.primary;
+
+    return Positioned(
+      left: position.dx,
+      top: position.dy,
+      child: GestureDetector(
+        onPanUpdate: (details) => _onStreamFabDragged(
+          details,
+          viewport,
+          safePadding,
+        ),
+        onPanEnd: (_) => _persistFloatingButtonPositions(),
+        onTap: () {
+          if (isFetchingMedia) {
+            return;
+          }
+
+          final provider = context.read<BrowserProvider>();
+          if (!hasDetectedMedia) {
+            unawaited(
+              provider.refreshCurrentPlatformMedia(
+                forceRefresh: true,
+                runHeadlessExtractor: true,
+              ),
+            );
+          }
+          _showMediaSheet(context, provider);
+        },
+        child: AnimatedBuilder(
+          animation: _streamPulseController,
+          builder: (context, _) {
+            final pulse = _isStreamPulseActive
+                ? _streamPulseController.value
+                : 0.0;
+            final scale = 1 + (0.12 * pulse);
+            final color = Color.lerp(baseColor, Colors.white, 0.16 * pulse) ??
+                baseColor;
+
+            return Transform.scale(
+              scale: scale,
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 160),
+                width: _streamFabSize,
+                height: _streamFabSize,
+                decoration: BoxDecoration(
+                  color: color,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withAlpha(70),
+                      blurRadius: 10,
+                      offset: const Offset(0, 3),
+                    ),
+                  ],
+                ),
+                child: Center(
+                  child: isFetchingMedia
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : Icon(
+                          hasFetchError
+                              ? Icons.refresh_rounded
+                              : hasDetectedMedia
+                              ? Icons.download_rounded
+                              : Icons.download_for_offline_rounded,
+                          color: Colors.white,
+                          size: 22,
+                        ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  void _onStreamFabDragged(
+    DragUpdateDetails details,
+    Size viewport,
+    EdgeInsets safePadding,
+  ) {
+    final currentAbsolute = _normalizedToAbsolute(
+      _streamFabNormalized,
+      viewport,
+      safePadding,
+      _streamFabSize,
+    );
+    final nextAbsolute = _clampAbsoluteOffset(
+      currentAbsolute + details.delta,
+      viewport,
+      safePadding,
+      _streamFabSize,
+    );
+
+    setState(() {
+      _streamFabNormalized = _absoluteToNormalized(
+        nextAbsolute,
+        viewport,
+        safePadding,
+        _streamFabSize,
+      );
+    });
+  }
+
+  void _openSettingsScreen(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => const SettingsScreen()),
+    );
+  }
+
+  // ignore: unused_element
+  Widget _buildTopChrome({
+    required String currentUrl,
+    required int tabCount,
+    required bool canGoForward,
+    required bool isLoading,
+  }) {
+    final showChrome = _isChromeVisible || _isUrlBarVisible;
+    final theme = Theme.of(context);
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 240),
+      curve: Curves.easeOutCubic,
+      height: showChrome ? (_isUrlBarVisible ? 112 : 58) : 0,
+      child: ClipRect(
+        child: IgnorePointer(
+          ignoring: !showChrome,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
+            child: Container(
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surface.withAlpha(245),
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(
+                  color: theme.colorScheme.outlineVariant.withAlpha(130),
+                ),
+                boxShadow: const [
+                  BoxShadow(
+                    blurRadius: 12,
+                    color: Color(0x1A000000),
+                    offset: Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    height: 44,
+                    child: Row(
+                      children: [
+                        const SizedBox(width: 12),
+                        const Icon(
+                          Icons.play_circle_fill_rounded,
+                          color: Color(0xFFFF0000),
+                          size: 26,
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          'YouTube',
+                          style: theme.textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.1,
+                          ),
+                        ),
+                        const Spacer(),
+                        IconButton(
+                          tooltip: _isUrlBarVisible ? 'Hide address bar' : 'Search or URL',
+                          icon: Icon(
+                            _isUrlBarVisible ? Icons.close : Icons.search,
+                          ),
+                          onPressed: _toggleUrlBarVisibility,
+                        ),
+                        Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            IconButton(
+                              tooltip: 'Tabs',
+                              icon: const Icon(Icons.filter_none),
+                              onPressed: () {
+                                _showChrome(keepVisible: true);
+                                _showTabsSheet(
+                                  context,
+                                  context.read<BrowserProvider>(),
+                                );
+                              },
+                            ),
+                            Positioned(
+                              child: IgnorePointer(
+                                child: Text(
+                                  '$tabCount',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                    color: theme.colorScheme.onSurface,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        IconButton(
+                          tooltip: 'More controls',
+                          icon: const Icon(Icons.more_vert),
+                          onPressed: () {
+                            _showChrome(keepVisible: true);
+                            _showQuickActionsSheet(
+                              canGoForward: canGoForward,
+                              isLoading: isLoading,
+                              currentUrl: currentUrl,
+                            );
+                          },
+                        ),
+                        const SizedBox(width: 4),
+                      ],
+                    ),
+                  ),
+                  if (_isUrlBarVisible)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                      child: _buildUrlBar(
+                        currentUrl: currentUrl,
+                        tabCount: tabCount,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ignore: unused_element
+  Widget _buildBottomChrome({
+    required bool canGoBack,
+    required bool canGoForward,
+    required bool isLoading,
+  }) {
+    final visible = _isChromeVisible && !_showHomePage;
+    final theme = Theme.of(context);
+
+    return IgnorePointer(
+      ignoring: !visible,
+      child: AnimatedSlide(
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+        offset: visible ? Offset.zero : const Offset(0, 1.2),
+        child: Align(
+          alignment: Alignment.bottomCenter,
+          child: SafeArea(
+            top: false,
+            minimum: const EdgeInsets.only(left: 12, right: 12, bottom: 8),
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 460),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              decoration: BoxDecoration(
+                color: theme.colorScheme.surface.withAlpha(245),
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(
+                  color: theme.colorScheme.outlineVariant.withAlpha(130),
+                ),
+                boxShadow: const [
+                  BoxShadow(
+                    blurRadius: 14,
+                    color: Color(0x22000000),
+                    offset: Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  IconButton(
+                    tooltip: 'Back',
+                    onPressed: canGoBack
+                        ? () {
+                            _webViewController?.goBack();
+                            _showChrome();
+                          }
+                        : null,
+                    icon: const Icon(Icons.arrow_back_ios_new_rounded),
+                  ),
+                  IconButton(
+                    tooltip: 'Forward',
+                    onPressed: canGoForward
+                        ? () {
+                            _webViewController?.goForward();
+                            _showChrome();
+                          }
+                        : null,
+                    icon: const Icon(Icons.arrow_forward_ios_rounded),
+                  ),
+                  IconButton(
+                    tooltip: 'Home shortcuts',
+                    onPressed: _goHome,
+                    icon: const Icon(Icons.home_rounded),
+                  ),
+                  IconButton(
+                    tooltip: isLoading ? 'Stop loading' : 'Refresh',
+                    onPressed: () {
+                      if (isLoading) {
+                        _webViewController?.stopLoading();
+                      } else {
+                        _webViewController?.reload();
+                      }
+                      _showChrome();
+                    },
+                    icon: Icon(isLoading ? Icons.close_rounded : Icons.refresh_rounded),
+                  ),
+                  Consumer<DownloadProvider>(
+                    builder: (context, downloadProvider, _) {
+                      return Stack(
+                        children: [
+                          IconButton(
+                            tooltip: 'Downloads',
+                            onPressed: () {
+                              _openDownloadsScreen(context);
+                              _showChrome(keepVisible: true);
+                            },
+                            icon: const Icon(Icons.download_rounded),
+                          ),
+                          if (downloadProvider.hasActiveDownloads)
+                            Positioned(
+                              right: 8,
+                              top: 8,
+                              child: Container(
+                                width: 8,
+                                height: 8,
+                                decoration: const BoxDecoration(
+                                  color: Colors.red,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                            ),
+                        ],
+                      );
+                    },
+                  ),
+                  IconButton(
+                    tooltip: 'More controls',
+                    onPressed: () {
+                      _showChrome(keepVisible: true);
+                      _showQuickActionsSheet(
+                        canGoForward: canGoForward,
+                        isLoading: isLoading,
+                        currentUrl: _urlController.text,
+                      );
+                    },
+                    icon: const Icon(Icons.tune_rounded),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showQuickActionsSheet({
+    required bool canGoForward,
+    required bool isLoading,
+    required String currentUrl,
+  }) async {
+    final provider = context.read<BrowserProvider>();
+    final canGoBack = provider.canGoBack;
+
+    await showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.search),
+                title: const Text('Search or enter URL'),
+                subtitle: Text(
+                  currentUrl,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  if (!_isUrlBarVisible) {
+                    _toggleUrlBarVisibility();
+                  }
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.filter_none),
+                title: const Text('Manage tabs'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _showTabsSheet(this.context, provider);
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.arrow_back),
+                enabled: canGoBack,
+                title: const Text('Go back'),
+                onTap: canGoBack
+                    ? () {
+                        Navigator.pop(context);
+                        _webViewController?.goBack();
+                      }
+                    : null,
+              ),
+              ListTile(
+                leading: const Icon(Icons.arrow_forward),
+                enabled: canGoForward,
+                title: const Text('Go forward'),
+                onTap: canGoForward
+                    ? () {
+                        Navigator.pop(context);
+                        _webViewController?.goForward();
+                      }
+                    : null,
+              ),
+              ListTile(
+                leading: Icon(isLoading ? Icons.close : Icons.refresh),
+                title: Text(isLoading ? 'Stop loading' : 'Refresh page'),
+                onTap: () {
+                  Navigator.pop(context);
+                  if (isLoading) {
+                    _webViewController?.stopLoading();
+                  } else {
+                    _webViewController?.reload();
+                  }
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.home_rounded),
+                title: const Text('Open quick sites'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _goHome();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.download_rounded),
+                title: const Text('Open downloads'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _openDownloadsScreen(this.context);
+                },
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+
+    _scheduleChromeAutoHide();
   }
 
   Widget _buildWebView() {
@@ -394,6 +1642,12 @@ class _BrowserScreenState extends State<BrowserScreen>
         RepaintBoundary(
           child: InAppWebView(
             initialUrlRequest: URLRequest(url: WebUri(_currentUrl)),
+            initialUserScripts: UnmodifiableListView<UserScript>([
+              UserScript(
+                source: _youtubeVisibilityBypassScript,
+                injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+              ),
+            ]),
             initialSettings: InAppWebViewSettings(
               javaScriptEnabled: true,
               javaScriptCanOpenWindowsAutomatically: false,
@@ -422,20 +1676,6 @@ class _BrowserScreenState extends State<BrowserScreen>
               userAgent:
                   'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
             ),
-            onScrollChanged: (controller, x, y) {
-              if (y > _lastScrollY && y > 100) {
-                // Scrolling down, aggressively hide past 100px
-                if (_isUrlBarVisible) {
-                  setState(() => _isUrlBarVisible = false);
-                }
-              } else if (y < _lastScrollY || y < 50) {
-                // Scrolling up or near top, show
-                if (!_isUrlBarVisible) {
-                  setState(() => _isUrlBarVisible = true);
-                }
-              }
-              _lastScrollY = y;
-            },
             onWebViewCreated: (controller) {
               _webViewController = controller;
               _isWebViewReady = true;
@@ -446,6 +1686,7 @@ class _BrowserScreenState extends State<BrowserScreen>
             onLoadStart: (controller, url) {
               final provider = context.read<BrowserProvider>();
               provider.setLoading(true);
+              _keepAlivePlaybackScriptInjected = false;
               unawaited(_syncRequestInterceptionMode(provider));
               _urlController.text = url?.toString() ?? '';
             },
@@ -546,6 +1787,8 @@ class _BrowserScreenState extends State<BrowserScreen>
                 canGoForward: canGoForward,
               );
 
+              unawaited(_injectPlaybackKeepAliveScript());
+              unawaited(_forceCurrentVideoPlayback());
               unawaited(_syncRequestInterceptionMode(provider));
             },
             onTitleChanged: (controller, title) {
@@ -668,47 +1911,6 @@ class _BrowserScreenState extends State<BrowserScreen>
               ? const LinearProgressIndicator()
               : const SizedBox.shrink(),
         ),
-
-        // Floating download button - only rebuild on button-relevant state
-        Selector<
-          BrowserProvider,
-          ({
-            bool hasDetectedMedia,
-            bool isYouTubePage,
-            bool hasFetchError,
-            int mediaCount,
-            bool isFetchingMedia,
-          })
-        >(
-          selector: (_, browserProvider) => (
-            hasDetectedMedia: browserProvider.hasDetectedMedia,
-            isYouTubePage: browserProvider.isYouTubePage,
-            hasFetchError: browserProvider.hasFetchError,
-            mediaCount: browserProvider.detectedMedia.length,
-            isFetchingMedia: browserProvider.isFetchingMedia,
-          ),
-          builder: (context, state, _) {
-            if (state.hasDetectedMedia ||
-                state.isYouTubePage ||
-                state.hasFetchError) {
-              return Positioned(
-                right: 16,
-                bottom: 16,
-                child: FloatingDownloadButton(
-                  mediaCount: state.mediaCount,
-                  isYouTube: state.isYouTubePage,
-                  isFetching: state.isFetchingMedia,
-                  hasError: state.hasFetchError,
-                  onPressed: () => _showMediaSheet(
-                    context,
-                    context.read<BrowserProvider>(),
-                  ),
-                ),
-              );
-            }
-            return const SizedBox.shrink();
-          },
-        ),
       ],
     );
   }
@@ -716,8 +1918,11 @@ class _BrowserScreenState extends State<BrowserScreen>
   void _goHome() {
     setState(() {
       _showHomePage = true;
-      // Don't destroy WebView — keep it alive offstage for instant return
+      _isUrlBarVisible = false;
+      _isChromeVisible = true;
+      // Don't destroy WebView — keep it alive offstage for instant return.
     });
+    _chromeAutoHideTimer?.cancel();
     _urlController.text = '';
   }
 
@@ -726,27 +1931,25 @@ class _BrowserScreenState extends State<BrowserScreen>
     required int tabCount,
   }) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-      color: Theme.of(context).colorScheme.surface,
+      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
       child: Row(
         children: [
           Expanded(
             child: Container(
               decoration: BoxDecoration(
                 color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                borderRadius: BorderRadius.circular(24),
+                borderRadius: BorderRadius.circular(22),
+                border: Border.all(
+                  color: Theme.of(context).colorScheme.outlineVariant,
+                ),
               ),
               child: Row(
                 children: [
                   const SizedBox(width: 12),
                   Icon(
-                    currentUrl.startsWith('https')
-                        ? Icons.lock
-                        : Icons.language,
+                    currentUrl.startsWith('https') ? Icons.search : Icons.language,
                     size: 18,
-                    color: currentUrl.startsWith('https')
-                        ? Colors.green
-                        : null,
+                    color: currentUrl.startsWith('https') ? null : Colors.orange,
                   ),
                   const SizedBox(width: 8),
                   Expanded(
@@ -754,7 +1957,7 @@ class _BrowserScreenState extends State<BrowserScreen>
                       controller: _urlController,
                       focusNode: _urlFocusNode,
                       decoration: const InputDecoration(
-                        hintText: 'Search or enter URL',
+                        hintText: 'Search YouTube or enter URL',
                         border: InputBorder.none,
                         isDense: true,
                         contentPadding: EdgeInsets.symmetric(vertical: 10),
@@ -836,7 +2039,7 @@ class _BrowserScreenState extends State<BrowserScreen>
                         onPressed: () {
                           provider.addNewTab();
                           Navigator.pop(context);
-                          _loadUrl('https://google.com'); // load default
+                          _loadUrl('https://m.youtube.com');
                         },
                       ),
                     ],
@@ -908,113 +2111,6 @@ class _BrowserScreenState extends State<BrowserScreen>
     );
   }
 
-  Widget _buildNavigationBar({
-    required bool canGoBack,
-    required bool canGoForward,
-    required bool isLoading,
-  }) {
-    // Current "selected" index logic based on state
-    int selectedIndex = _showHomePage
-        ? 2
-        : 0; // Default to Home or just a generic unselected state if possible
-
-    return NavigationBar(
-      selectedIndex: selectedIndex,
-      onDestinationSelected: (int index) {
-        switch (index) {
-          case 0:
-            if (!_showHomePage && canGoBack) {
-              _webViewController?.goBack();
-            }
-            break;
-          case 1:
-            if (!_showHomePage && canGoForward) {
-              _webViewController?.goForward();
-            }
-            break;
-          case 2:
-            _goHome();
-            break;
-          case 3:
-            if (!_showHomePage) {
-              if (isLoading) {
-                _webViewController?.stopLoading();
-              } else {
-                _webViewController?.reload();
-              }
-            }
-            break;
-          case 4:
-            _openDownloadsScreen(context);
-            break;
-        }
-      },
-      destinations: [
-        NavigationDestination(
-          icon: Icon(
-            Icons.arrow_back,
-            color: (!_showHomePage && canGoBack)
-                ? null
-                : Theme.of(context).disabledColor,
-          ),
-          label: 'Back',
-        ),
-        NavigationDestination(
-          icon: Icon(
-            Icons.arrow_forward,
-            color: (!_showHomePage && canGoForward)
-                ? null
-                : Theme.of(context).disabledColor,
-          ),
-          label: 'Forward',
-        ),
-        NavigationDestination(
-          icon: Icon(
-            Icons.home,
-            color: _showHomePage ? Theme.of(context).colorScheme.primary : null,
-          ),
-          label: 'Home',
-        ),
-        NavigationDestination(
-          icon: Icon(
-            _showHomePage
-                ? Icons.refresh
-                : (isLoading ? Icons.close : Icons.refresh),
-            color: _showHomePage ? Theme.of(context).disabledColor : null,
-          ),
-          label: isLoading ? 'Stop' : 'Refresh',
-        ),
-        NavigationDestination(
-          icon: Stack(
-            children: [
-              const Icon(Icons.download),
-              Consumer<DownloadProvider>(
-                builder: (context, downloadProvider, _) {
-                  if (downloadProvider.hasActiveDownloads) {
-                    return Positioned(
-                      right: 0,
-                      top: 0,
-                      child: Container(
-                        width: 8,
-                        height: 8,
-                        decoration: const BoxDecoration(
-                          color: Colors.red,
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                    );
-                  }
-                  return const SizedBox.shrink();
-                },
-              ),
-            ],
-          ),
-          label: 'Downloads',
-        ),
-      ],
-    );
-  }
-
   Future<void> _showMediaSheet(
     BuildContext context,
     BrowserProvider browserProvider,
@@ -1022,6 +2118,7 @@ class _BrowserScreenState extends State<BrowserScreen>
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       backgroundColor: Colors.transparent,
       builder: (context) => ChangeNotifierProvider.value(
         value: browserProvider,
@@ -1043,17 +2140,44 @@ class _CachedMediaSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<BrowserProvider>(
-      builder: (context, browserProvider, _) {
-        return MediaSelectionSheet(
-          media: browserProvider.detectedMedia,
+    return Selector<
+      BrowserProvider,
+      ({int mediaVersion, bool isYouTube, bool isFetching, String? errorMessage})
+    >(
+      selector: (_, browserProvider) {
+        return (
+          mediaVersion: browserProvider.mediaStateVersion,
           isYouTube: browserProvider.isYouTubePage,
           isFetching: browserProvider.isFetchingMedia,
           errorMessage: browserProvider.fetchError,
-          onRefresh: () =>
-              browserProvider.refreshCurrentPlatformMedia(forceRefresh: true),
+        );
+      },
+      builder: (context, state, _) {
+        final browserProvider = context.read<BrowserProvider>();
+        return MediaSelectionSheet(
+          media: browserProvider.detectedMedia,
+          isYouTube: state.isYouTube,
+          isFetching: state.isFetching,
+          errorMessage: state.errorMessage,
+          onRefresh: () {
+            context.read<BrowserProvider>().refreshCurrentPlatformMedia(
+              forceRefresh: true,
+            );
+          },
         );
       },
     );
   }
+}
+
+class _OmniMenuAction {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+
+  const _OmniMenuAction({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+  });
 }

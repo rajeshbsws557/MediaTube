@@ -154,11 +154,7 @@ class PlaybackPlatformBridge(
     }
 
     private fun stopMediaSession() {
-        val intent = Intent(activity, MediaPlaybackService::class.java).apply {
-            action = MediaPlaybackService.ACTION_STOP_SESSION
-        }
-
-        activity.startService(intent)
+        activity.stopService(Intent(activity, MediaPlaybackService::class.java))
     }
 
     private fun applyPipParameters() {

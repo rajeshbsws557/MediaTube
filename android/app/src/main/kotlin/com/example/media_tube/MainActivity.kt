@@ -76,10 +76,6 @@ class MainActivity : FlutterFragmentActivity() {
         }
     }
     
-    override fun getBackgroundMode(): io.flutter.embedding.android.FlutterActivityLaunchConfigs.BackgroundMode {
-        return io.flutter.embedding.android.FlutterActivityLaunchConfigs.BackgroundMode.transparent
-    }
-
     override fun onDestroy() {
         castPlatformBridge?.dispose()
         nearbyPlatformBridge?.dispose()

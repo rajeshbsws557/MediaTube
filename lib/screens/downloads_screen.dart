@@ -402,16 +402,19 @@ class _DownloadsScreenState extends State<DownloadsScreen>
           ),
         ],
       ),
-      body: TabBarView(
-        controller: _tabController,
-        children: [
-          // Active downloads - uses Selector for minimal rebuilds
-          _ActiveDownloadsTab(),
-          // Completed downloads
-          _CompletedDownloadsTab(),
-          // History (all downloads)
-          _HistoryDownloadsTab(),
-        ],
+      body: SafeArea(
+        top: false,
+        child: TabBarView(
+          controller: _tabController,
+          children: [
+            // Active downloads - uses Selector for minimal rebuilds
+            _ActiveDownloadsTab(),
+            // Completed downloads
+            _CompletedDownloadsTab(),
+            // History (all downloads)
+            _HistoryDownloadsTab(),
+          ],
+        ),
       ),
     );
   }

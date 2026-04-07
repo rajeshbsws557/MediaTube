@@ -222,102 +222,104 @@ class _NearbyRadarScreenState extends State<NearbyRadarScreen>
           ),
         ],
       ),
-      body: Column(
-        children: [
-          const SizedBox(height: 16),
-          SizedBox(
-            width: 220,
-            height: 220,
-            child: AnimatedBuilder(
-              animation: _radarController,
-              builder: (context, _) {
-                return CustomPaint(
-                  painter: _RadarPainter(_radarController.value),
-                  child: const Center(
-                    child: CircleAvatar(
-                      radius: 28,
-                      child: Icon(Icons.radar, size: 30),
-                    ),
-                  ),
-                );
-              },
-            ),
-          ),
-          Text(
-            _nearbyService.isRadarRunning
-                ? 'Scanning for nearby MediaTube users'
-                : 'Radar is paused',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          const SizedBox(height: 4),
-          Text('${_nearbyService.peers.length} users detected nearby'),
-          if (_nearbyService.lastError != null)
-            Padding(
-              padding: const EdgeInsets.all(8),
-              child: Text(
-                _nearbyService.lastError!,
-                style: const TextStyle(color: Colors.red),
-              ),
-            ),
-          if (_nearbyService.requests.isNotEmpty)
-            Container(
-              margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.primaryContainer,
-                borderRadius: BorderRadius.circular(14),
-              ),
-              child: Column(
-                children: _nearbyService.requests.map((request) {
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '${request.endpointName} wants to connect',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              Text('Security code: ${request.authToken}'),
-                            ],
-                          ),
-                        ),
-                        TextButton(
-                          onPressed: () {
-                            unawaited(_rejectRequest(request));
-                          },
-                          child: const Text('Reject'),
-                        ),
-                        FilledButton(
-                          onPressed: () {
-                            unawaited(_acceptRequest(request));
-                          },
-                          child: const Text('Accept'),
-                        ),
-                      ],
+      body: SafeArea(
+        top: false,
+        child: Column(
+          children: [
+            const SizedBox(height: 16),
+            SizedBox(
+              width: 220,
+              height: 220,
+              child: AnimatedBuilder(
+                animation: _radarController,
+                builder: (context, _) {
+                  return CustomPaint(
+                    painter: _RadarPainter(_radarController.value),
+                    child: const Center(
+                      child: CircleAvatar(
+                        radius: 28,
+                        child: Icon(Icons.radar, size: 30),
+                      ),
                     ),
                   );
-                }).toList(),
+                },
               ),
             ),
-          const SizedBox(height: 8),
-          Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              itemCount: _nearbyService.peers.length,
-              itemBuilder: (context, index) {
-                final peer = _nearbyService.peers[index];
-                return Card(
-                  child: ListTile(
-                    leading: Icon(
-                      peer.isConnected
-                          ? Icons.bluetooth_connected
-                          : Icons.person_search,
+            Text(
+              _nearbyService.isRadarRunning
+                  ? 'Scanning for nearby MediaTube users'
+                  : 'Radar is paused',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 4),
+            Text('${_nearbyService.peers.length} users detected nearby'),
+            if (_nearbyService.lastError != null)
+              Padding(
+                padding: const EdgeInsets.all(8),
+                child: Text(
+                  _nearbyService.lastError!,
+                  style: const TextStyle(color: Colors.red),
+                ),
+              ),
+            if (_nearbyService.requests.isNotEmpty)
+              Container(
+                margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.primaryContainer,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Column(
+                  children: _nearbyService.requests.map((request) {
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  '${request.endpointName} wants to connect',
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                Text('Security code: ${request.authToken}'),
+                              ],
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () {
+                              unawaited(_rejectRequest(request));
+                            },
+                            child: const Text('Reject'),
+                          ),
+                          FilledButton(
+                            onPressed: () {
+                              unawaited(_acceptRequest(request));
+                            },
+                            child: const Text('Accept'),
+                          ),
+                        ],
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: ListView.builder(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                itemCount: _nearbyService.peers.length,
+                itemBuilder: (context, index) {
+                  final peer = _nearbyService.peers[index];
+                  return Card(
+                    child: ListTile(
+                      leading: Icon(
+                        peer.isConnected
+                            ? Icons.bluetooth_connected
+                            : Icons.person_search,
                     ),
                     title: Text(peer.endpointName),
                     subtitle: Text(
@@ -395,6 +397,7 @@ class _NearbyRadarScreenState extends State<NearbyRadarScreen>
             ),
         ],
       ),
+    ),
     );
   }
 

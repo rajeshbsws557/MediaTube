@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:io' show Platform;
 import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -9,11 +10,13 @@ import 'package:provider/provider.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../providers/providers.dart';
+import '../models/models.dart';
 import '../services/services.dart';
 import '../utils/utils.dart';
 import '../widgets/widgets.dart';
 import 'downloads_screen.dart';
 import 'settings_screen.dart';
+import 'youtube_playback_screen.dart';
 
 class BrowserScreen extends StatefulWidget {
   const BrowserScreen({super.key});
@@ -97,10 +100,17 @@ class _BrowserScreenState extends State<BrowserScreen>
   String _lastKnownPlaybackTitle = 'MediaTube';
   bool _lastForegroundPlaybackIntentPlay = false;
   bool _wasVideoPlayingBeforeBackground = false;
+  bool _nativeBackgroundHandoffInProgress = false;
+  String? _lastNativeBackgroundHandoffVideoId;
+  DateTime _lastNativeBackgroundHandoffAt =
+      DateTime.fromMillisecondsSinceEpoch(0);
+  int? _androidSdkInt;
+  bool _androidSdkLookupInProgress = false;
 
   static const Duration _backgroundPlaybackTickInterval = Duration(seconds: 6);
   static const Duration _foregroundIntentPollInterval = Duration(milliseconds: 1200);
   static const Duration _backgroundLifecycleDebounce = Duration(milliseconds: 180);
+  static const Duration _nativeBackgroundHandoffCooldown = Duration(seconds: 25);
   static const int _maxNoPlaybackDetectionsBeforeStop = 3;
 
   SharedPreferences? _cachedPrefs;
@@ -109,6 +119,7 @@ class _BrowserScreenState extends State<BrowserScreen>
       BackgroundDownloadService();
     final AndroidPlaybackBridgeService _nativePlaybackBridge =
       AndroidPlaybackBridgeService();
+    final YouTubeService _backgroundYouTubeService = YouTubeService();
   bool _playbackForegroundProtectionEnabled = false;
     bool _browserPipConfigured = false;
 
@@ -155,6 +166,7 @@ class _BrowserScreenState extends State<BrowserScreen>
     WidgetsBinding.instance.addObserver(this);
     _attachFrameTimingProbe();
     unawaited(_nativePlaybackBridge.ensureListening());
+    unawaited(_ensureAndroidSdkInt());
     _omniMenuController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 280),
@@ -305,6 +317,23 @@ class _BrowserScreenState extends State<BrowserScreen>
     }
   }
 
+  Future<void> _ensureAndroidSdkInt() async {
+    if (!Platform.isAndroid || _androidSdkInt != null || _androidSdkLookupInProgress) {
+      return;
+    }
+
+    _androidSdkLookupInProgress = true;
+    try {
+      const platform = MethodChannel('com.rajesh.mediatube/app');
+      _androidSdkInt = await platform.invokeMethod<int>('getAndroidSdkInt');
+    } catch (e) {
+      debugPrint('Failed to read Android SDK level: $e');
+      _androidSdkInt = null;
+    } finally {
+      _androidSdkLookupInProgress = false;
+    }
+  }
+
   void _startForegroundPlaybackIntentPolling() {
     if (_foregroundPlaybackIntentPollTimer != null) {
       return;
@@ -402,16 +431,220 @@ class _BrowserScreenState extends State<BrowserScreen>
     }
   }
 
-  Future<void> _requestBrowserPipHandoff() async {
+  Future<bool> _requestBrowserPipHandoff() async {
     if (_showHomePage) {
-      return;
+      return false;
     }
 
     await _configureBrowserPip(enabled: true);
     try {
-      await _nativePlaybackBridge.enterPipNow();
+      return await _nativePlaybackBridge.enterPipNow();
     } catch (e) {
       debugPrint('Browser PiP handoff failed: $e');
+      return false;
+    }
+  }
+
+  bool _shouldUseNativeYouTubeBackgroundFallback() {
+    if (!Platform.isAndroid) {
+      return false;
+    }
+
+    // Android 11 and below are notably less reliable for WebView playback
+    // through Home + screen-off transitions.
+    final sdk = _androidSdkInt;
+    if (sdk != null) {
+      return sdk <= 30;
+    }
+
+    // If SDK lookup isn't available yet, prefer safe fallback.
+    return true;
+  }
+
+  bool _isLikelyYouTubePlaybackContext() {
+    final provider = _browserProviderRef;
+    final currentUrl = provider?.currentUrl ?? _currentUrl;
+    return (provider?.isYouTubePage ?? false) ||
+        _backgroundYouTubeService.isValidYouTubeUrl(currentUrl);
+  }
+
+  bool _isDirectBackgroundPlayableVideo(DetectedMedia media) {
+    if (media.type != MediaType.video) {
+      return false;
+    }
+
+    if (media.isDash || media.useBackend) {
+      return false;
+    }
+
+    final uri = Uri.tryParse(media.url);
+    if (uri == null || uri.host.isEmpty) {
+      return false;
+    }
+
+    final scheme = uri.scheme.toLowerCase();
+    if (scheme != 'http' && scheme != 'https') {
+      return false;
+    }
+
+    final host = uri.host.toLowerCase();
+    if (host.contains('youtube.com') || host == 'youtu.be') {
+      return false;
+    }
+
+    return true;
+  }
+
+  int _extractResolutionScore(String quality) {
+    final match = RegExp(r'(\d{3,4})p', caseSensitive: false)
+        .firstMatch(quality);
+    return match == null ? 0 : int.tryParse(match.group(1) ?? '') ?? 0;
+  }
+
+  int _extractBitrateScore(String quality) {
+    final match = RegExp(r'(\d{2,4})\s*kbps', caseSensitive: false)
+        .firstMatch(quality);
+    return match == null ? 0 : int.tryParse(match.group(1) ?? '') ?? 0;
+  }
+
+  DetectedMedia? _pickBackgroundPlayableVideo(Iterable<DetectedMedia> media) {
+    final directVideos = media
+        .where(_isDirectBackgroundPlayableVideo)
+        .toList();
+
+    if (directVideos.isEmpty) {
+      return null;
+    }
+
+    directVideos.sort((a, b) {
+      final scoreA = _extractResolutionScore(a.quality ?? '');
+      final scoreB = _extractResolutionScore(b.quality ?? '');
+      if (scoreA != scoreB) {
+        return scoreB.compareTo(scoreA);
+      }
+
+      final sizeA = a.fileSize ?? 0;
+      final sizeB = b.fileSize ?? 0;
+      return sizeB.compareTo(sizeA);
+    });
+
+    return directVideos.first;
+  }
+
+  DetectedMedia? _pickBackgroundPlayableAudio(Iterable<DetectedMedia> media) {
+    final audio = media.where((m) => m.type == MediaType.audio).toList();
+    if (audio.isEmpty) {
+      return null;
+    }
+
+    audio.sort((a, b) {
+      final scoreA = _extractBitrateScore(a.quality ?? '');
+      final scoreB = _extractBitrateScore(b.quality ?? '');
+      if (scoreA != scoreB) {
+        return scoreB.compareTo(scoreA);
+      }
+
+      final sizeA = a.fileSize ?? 0;
+      final sizeB = b.fileSize ?? 0;
+      return sizeB.compareTo(sizeA);
+    });
+
+    return audio.first;
+  }
+
+  Future<DetectedMedia?> _resolveNativeYouTubeBackgroundMedia() async {
+    final provider = _browserProviderRef;
+    final currentUrl = provider?.currentUrl ?? _currentUrl;
+
+    if (!_backgroundYouTubeService.isValidYouTubeUrl(currentUrl)) {
+      return null;
+    }
+
+    final currentVideoId = _backgroundYouTubeService.extractVideoId(currentUrl);
+    final now = DateTime.now();
+    if (currentVideoId != null &&
+        _lastNativeBackgroundHandoffVideoId == currentVideoId &&
+        now.difference(_lastNativeBackgroundHandoffAt) <
+            _nativeBackgroundHandoffCooldown) {
+      return null;
+    }
+
+    final available = provider?.detectedMedia ?? const <DetectedMedia>[];
+    final fromYouTube = available
+        .where((m) => m.source == MediaSource.youtube)
+        .toList();
+
+    final directVideo = _pickBackgroundPlayableVideo(fromYouTube);
+    if (directVideo != null) {
+      return directVideo;
+    }
+
+    final audioFromProvider = _pickBackgroundPlayableAudio(fromYouTube);
+    if (audioFromProvider != null) {
+      return audioFromProvider;
+    }
+
+    final bestMuxed = await _backgroundYouTubeService.getBestMuxedStream(
+      currentUrl,
+    );
+    if (bestMuxed != null && _isDirectBackgroundPlayableVideo(bestMuxed)) {
+      return bestMuxed.copyWith(
+        source: MediaSource.youtube,
+        videoId: currentVideoId,
+      );
+    }
+
+    final streams = await _backgroundYouTubeService.getAvailableStreams(
+      currentUrl,
+      useBackendForDash: false,
+    );
+
+    final resolvedVideo = _pickBackgroundPlayableVideo(streams);
+    if (resolvedVideo != null) {
+      return resolvedVideo;
+    }
+
+    return _pickBackgroundPlayableAudio(streams);
+  }
+
+  Future<void> _attemptNativeYouTubeBackgroundHandoff() async {
+    if (!mounted ||
+        _showHomePage ||
+        _nativeBackgroundHandoffInProgress ||
+        !_isLikelyYouTubePlaybackContext()) {
+      return;
+    }
+
+    _nativeBackgroundHandoffInProgress = true;
+    try {
+      final media = await _resolveNativeYouTubeBackgroundMedia();
+      if (!mounted || media == null) {
+        return;
+      }
+
+      final handoffVideoId = media.videoId ??
+          _backgroundYouTubeService.extractVideoId(
+            _browserProviderRef?.currentUrl ?? _currentUrl,
+          );
+
+      if (handoffVideoId != null) {
+        _lastNativeBackgroundHandoffVideoId = handoffVideoId;
+        _lastNativeBackgroundHandoffAt = DateTime.now();
+      }
+
+      final navigator = Navigator.of(context, rootNavigator: true);
+      unawaited(
+        YoutubePlaybackScreen.pushBackground(
+          navigator: navigator,
+          media: media,
+        ),
+      );
+    } catch (e) {
+      debugPrint('Native YouTube background handoff failed: $e');
+    } finally {
+      Future<void>.delayed(const Duration(seconds: 2), () {
+        _nativeBackgroundHandoffInProgress = false;
+      });
     }
   }
 
@@ -491,7 +724,15 @@ class _BrowserScreenState extends State<BrowserScreen>
     _wasVideoPlayingBeforeBackground = shouldContinue;
 
     if (_wasVideoPlayingBeforeBackground) {
-      unawaited(_requestBrowserPipHandoff());
+      final pipHandoffReady = await _requestBrowserPipHandoff();
+
+      if (_shouldUseNativeYouTubeBackgroundFallback() &&
+          _isLikelyYouTubePlaybackContext()) {
+        unawaited(_attemptNativeYouTubeBackgroundHandoff());
+      } else if (!pipHandoffReady && _isLikelyYouTubePlaybackContext()) {
+        unawaited(_attemptNativeYouTubeBackgroundHandoff());
+      }
+
       unawaited(
         _activateBackgroundPlaybackAutomation(usePlaybackDelay: true),
       );

@@ -27,6 +27,8 @@ class MainActivity : FlutterFragmentActivity() {
                 if (call.method == "moveToBackground") {
                     val success = moveTaskToBack(true)
                     result.success(success)
+                } else if (call.method == "getAndroidSdkInt") {
+                    result.success(android.os.Build.VERSION.SDK_INT)
                 } else {
                     result.notImplemented()
                 }

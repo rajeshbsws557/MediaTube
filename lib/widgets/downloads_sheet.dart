@@ -14,28 +14,47 @@ class DownloadsSheet extends StatelessWidget {
       maxChildSize: 0.9,
       expand: false,
       builder: (context, scrollController) {
-        return Consumer<DownloadProvider>(
-          builder: (context, downloadProvider, _) {
-            return Container(
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.surface,
-                borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+        return Container(
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surface,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+          ),
+          child: Column(
+            children: [
+              // Handle
+              Container(
+                margin: const EdgeInsets.symmetric(vertical: 8),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey[400],
+                  borderRadius: BorderRadius.circular(2),
+                ),
               ),
-              child: Column(
-                children: [
-                  // Handle
-                  Container(
-                    margin: const EdgeInsets.symmetric(vertical: 8),
-                    width: 40,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.grey[400],
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                  
-                  // Header with actions
-                  Padding(
+
+              // Header with actions
+              Selector<
+                DownloadProvider,
+                ({
+                  int total,
+                  int active,
+                  int paused,
+                  int completed,
+                  bool hasActive,
+                  bool hasPaused,
+                })
+              >(
+                selector: (_, provider) => (
+                  total: provider.downloads.length,
+                  active: provider.activeDownloads.length,
+                  paused: provider.pausedDownloads.length,
+                  completed: provider.completedDownloads.length,
+                  hasActive: provider.hasActiveDownloads,
+                  hasPaused: provider.hasPausedDownloads,
+                ),
+                builder: (context, summary, _) {
+                  final downloadProvider = context.read<DownloadProvider>();
+                  return Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     child: Row(
                       children: [
@@ -49,9 +68,9 @@ class DownloadsSheet extends StatelessWidget {
                                 'Downloads',
                                 style: Theme.of(context).textTheme.titleLarge,
                               ),
-                              if (downloadProvider.downloads.isNotEmpty)
+                              if (summary.total > 0)
                                 Text(
-                                  '${downloadProvider.activeDownloads.length} active, ${downloadProvider.pausedDownloads.length} paused, ${downloadProvider.completedDownloads.length} completed',
+                                  '${summary.active} active, ${summary.paused} paused, ${summary.completed} completed',
                                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                                     color: Colors.grey[600],
                                   ),
@@ -59,20 +78,19 @@ class DownloadsSheet extends StatelessWidget {
                             ],
                           ),
                         ),
-                        // Quick actions
-                        if (downloadProvider.hasActiveDownloads)
+                        if (summary.hasActive)
                           IconButton(
                             icon: const Icon(Icons.pause_circle_outline),
                             tooltip: 'Pause All',
                             onPressed: downloadProvider.pauseAllDownloads,
                           ),
-                        if (downloadProvider.hasPausedDownloads)
+                        if (summary.hasPaused)
                           IconButton(
                             icon: const Icon(Icons.play_circle_outline),
                             tooltip: 'Resume All',
                             onPressed: downloadProvider.resumeAllDownloads,
                           ),
-                        if (downloadProvider.downloads.isNotEmpty)
+                        if (summary.total > 0)
                           PopupMenuButton<String>(
                             icon: const Icon(Icons.more_vert),
                             onSelected: (value) {
@@ -96,7 +114,7 @@ class DownloadsSheet extends StatelessWidget {
                                   ],
                                 ),
                               ),
-                              if (downloadProvider.hasActiveDownloads)
+                              if (summary.hasActive)
                                 const PopupMenuItem(
                                   value: 'cancel_all',
                                   child: Row(
@@ -111,29 +129,61 @@ class DownloadsSheet extends StatelessWidget {
                           ),
                       ],
                     ),
-                  ),
-                  
-                  const Divider(height: 1),
-                  
-                  // Downloads list
-                  Expanded(
-                    child: downloadProvider.downloads.isEmpty
-                        ? _buildEmptyState()
-                        : ListView.separated(
-                            controller: scrollController,
-                            itemCount: downloadProvider.downloads.length,
-                            separatorBuilder: (_, __) => const Divider(height: 1),
-                            itemBuilder: (context, index) {
-                              return _DownloadListItem(
-                                task: downloadProvider.downloads[index],
-                              );
-                            },
-                          ),
-                  ),
-                ],
+                  );
+                },
               ),
-            );
-          },
+
+              const Divider(height: 1),
+
+              // Downloads list
+              Expanded(
+                child: Selector<DownloadProvider, List<String>>(
+                  selector: (_, provider) => provider.downloads
+                      .map(
+                        (d) =>
+                            '${d.id}:${d.status.index}:${(d.progress * 100).toStringAsFixed(0)}',
+                      )
+                      .toList(growable: false),
+                  shouldRebuild: (prev, next) {
+                    if (prev.length != next.length) {
+                      return true;
+                    }
+                    for (var i = 0; i < prev.length; i++) {
+                      if (prev[i] != next[i]) {
+                        return true;
+                      }
+                    }
+                    return false;
+                  },
+                  builder: (context, signatures, child) {
+                    final downloads = context.read<DownloadProvider>().downloads;
+                    if (downloads.isEmpty) {
+                      return _buildEmptyState();
+                    }
+
+                    return ListView.separated(
+                      controller: scrollController,
+                      cacheExtent: 420,
+                      addAutomaticKeepAlives: false,
+                      addRepaintBoundaries: true,
+                      itemCount: downloads.length,
+                        separatorBuilder: (context, index) =>
+                          const Divider(height: 1),
+                      itemBuilder: (context, index) {
+                        final task = downloads[index];
+                        return RepaintBoundary(
+                          child: _DownloadListItem(
+                            key: ValueKey(task.id),
+                            task: task,
+                          ),
+                        );
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
         );
       },
     );
@@ -198,7 +248,7 @@ class DownloadsSheet extends StatelessWidget {
 class _DownloadListItem extends StatelessWidget {
   final DownloadTask task;
 
-  const _DownloadListItem({required this.task});
+  const _DownloadListItem({super.key, required this.task});
 
   @override
   Widget build(BuildContext context) {

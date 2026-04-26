@@ -17,7 +17,6 @@ import 'dart:isolate';
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:audio_session/audio_session.dart';
 
@@ -79,7 +78,6 @@ void main() async {
   // MobileAds.instance.initialize(); // Without await
   // ============================================================
 
-
   // Initialize port for foreground task communication
   FlutterForegroundTask.initCommunicationPort();
 
@@ -108,23 +106,33 @@ class MediaTubeApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     const youtubeRed = Color(0xFFFF0000);
-    final lightScheme = ColorScheme.fromSeed(
-      seedColor: youtubeRed,
-      brightness: Brightness.light,
-    ).copyWith(
-      primary: youtubeRed,
-      secondary: youtubeRed,
-      onPrimary: Colors.white,
-    );
+    final lightScheme =
+        ColorScheme.fromSeed(
+          seedColor: youtubeRed,
+          brightness: Brightness.light,
+        ).copyWith(
+          primary: youtubeRed,
+          secondary: const Color(0xFF1A1A1A),
+          onPrimary: Colors.white,
+          surface: const Color(0xFFF8F9FA),
+        );
 
-    final darkScheme = ColorScheme.fromSeed(
-      seedColor: youtubeRed,
-      brightness: Brightness.dark,
-    ).copyWith(
-      primary: youtubeRed,
-      secondary: youtubeRed,
-      onPrimary: Colors.white,
-    );
+    final darkScheme =
+        ColorScheme.fromSeed(
+          seedColor: youtubeRed,
+          brightness: Brightness.dark,
+        ).copyWith(
+          primary: youtubeRed,
+          secondary: const Color(0xFFE0E0E0),
+          onPrimary: Colors.white,
+          surface: const Color(0xFF0E0E12),
+          surfaceContainerHighest: const Color(0xFF1C1C24),
+          onSurface: const Color(0xFFE8E8EC),
+          outline: const Color(0xFF3A3A44),
+          outlineVariant: const Color(0xFF2A2A34),
+        );
+
+    final baseTheme = ThemeData(useMaterial3: true);
 
     return MultiProvider(
       providers: [
@@ -134,9 +142,7 @@ class MediaTubeApp extends StatelessWidget {
           create: (_) => DownloadProvider(),
           update: (_, settings, downloadProvider) {
             final provider = downloadProvider ?? DownloadProvider();
-            provider.setMaxConcurrentDownloads(
-              settings.maxConcurrentDownloads,
-            );
+            provider.setMaxConcurrentDownloads(settings.maxConcurrentDownloads);
             return provider;
           },
         ),
@@ -156,26 +162,81 @@ class MediaTubeApp extends StatelessWidget {
             child: child ?? const SizedBox.shrink(),
           );
         },
-        theme: ThemeData(
+        theme: baseTheme.copyWith(
           colorScheme: lightScheme,
-          useMaterial3: true,
+          scaffoldBackgroundColor: lightScheme.surface,
+          cardTheme: CardThemeData(
+            elevation: 0,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            clipBehavior: Clip.antiAlias,
+            color: Colors.white,
+          ),
+          bottomSheetTheme: const BottomSheetThemeData(
+            elevation: 0,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+            ),
+          ),
+          floatingActionButtonTheme: FloatingActionButtonThemeData(
+            elevation: 2,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          ),
           appBarTheme: const AppBarTheme(
             elevation: 0,
             scrolledUnderElevation: 0,
+            centerTitle: true,
+            backgroundColor: Colors.transparent,
+            iconTheme: IconThemeData(color: Colors.black87),
           ),
           navigationBarTheme: NavigationBarThemeData(
             indicatorColor: youtubeRed.withAlpha(36),
+            labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+            elevation: 0,
+            backgroundColor: Colors.white.withValues(alpha: 0.95), // Modern slightly transparent nav
+          ),
+          snackBarTheme: SnackBarThemeData(
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            elevation: 4,
           ),
         ),
-        darkTheme: ThemeData(
+        darkTheme: baseTheme.copyWith(
           colorScheme: darkScheme,
-          useMaterial3: true,
+          scaffoldBackgroundColor: darkScheme.surface,
+          cardTheme: CardThemeData(
+            elevation: 0,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            clipBehavior: Clip.antiAlias,
+            color: const Color(0xFF161620),
+          ),
+          bottomSheetTheme: const BottomSheetThemeData(
+            elevation: 0,
+            backgroundColor: Color(0xFF121218),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+            ),
+          ),
+          floatingActionButtonTheme: FloatingActionButtonThemeData(
+            elevation: 2,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          ),
           appBarTheme: const AppBarTheme(
             elevation: 0,
             scrolledUnderElevation: 0,
+            centerTitle: true,
+            backgroundColor: Colors.transparent,
+            iconTheme: IconThemeData(color: Colors.white70),
           ),
           navigationBarTheme: NavigationBarThemeData(
             indicatorColor: youtubeRed.withAlpha(50),
+            labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+            elevation: 0,
+            backgroundColor: const Color(0xFF121212).withValues(alpha: 0.95),
+          ),
+          snackBarTheme: SnackBarThemeData(
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            elevation: 4,
           ),
         ),
         themeMode: ThemeMode.system,
@@ -193,7 +254,7 @@ class MediaTubeBootstrap extends StatefulWidget {
 }
 
 class _MediaTubeBootstrapState extends State<MediaTubeBootstrap> {
-  static const Duration _splashDuration = Duration(milliseconds: 2400);
+  static const Duration _splashDuration = Duration(milliseconds: 1200);
   Timer? _splashTimer;
   bool _showMainApp = false;
 
@@ -227,8 +288,31 @@ class _MediaTubeBootstrapState extends State<MediaTubeBootstrap> {
   }
 }
 
-class MediaTubeSplashScreen extends StatelessWidget {
+class MediaTubeSplashScreen extends StatefulWidget {
   const MediaTubeSplashScreen({super.key});
+
+  @override
+  State<MediaTubeSplashScreen> createState() => _MediaTubeSplashScreenState();
+}
+
+class _MediaTubeSplashScreenState extends State<MediaTubeSplashScreen>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _shimmerController;
+
+  @override
+  void initState() {
+    super.initState();
+    _shimmerController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1800),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _shimmerController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -242,11 +326,7 @@ class MediaTubeSplashScreen extends StatelessWidget {
             gradient: LinearGradient(
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
-              colors: [
-                Color(0xFF080808),
-                Color(0xFF151515),
-                Color(0xFF2A0000),
-              ],
+              colors: [Color(0xFF060608), Color(0xFF0E0E18), Color(0xFF2A0008)],
               stops: [0.0, 0.58, 1.0],
             ),
           ),
@@ -261,7 +341,12 @@ class MediaTubeSplashScreen extends StatelessWidget {
                   height: 220,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: Colors.red.withAlpha(28),
+                    gradient: RadialGradient(
+                      colors: [
+                        Colors.red.withAlpha(32),
+                        Colors.red.withAlpha(0),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -273,7 +358,12 @@ class MediaTubeSplashScreen extends StatelessWidget {
                   height: 240,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: Colors.white.withAlpha(16),
+                    gradient: RadialGradient(
+                      colors: [
+                        Colors.white.withAlpha(12),
+                        Colors.white.withAlpha(0),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -296,61 +386,103 @@ class MediaTubeSplashScreen extends StatelessWidget {
                       children: [
                         const Spacer(flex: 2),
                         TweenAnimationBuilder<double>(
-                          tween: Tween<double>(begin: 0.9, end: 1),
-                          duration: const Duration(milliseconds: 900),
+                          tween: Tween<double>(begin: 0.85, end: 1),
+                          duration: const Duration(milliseconds: 700),
                           curve: Curves.easeOutBack,
-                          builder: (context, scale, child) => Transform.scale(
-                            scale: scale,
-                            child: child,
-                          ),
-                          child: Container(
-                            width: tileSize,
-                            height: tileSize,
-                            padding: EdgeInsets.all(tilePadding),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(tileRadius),
-                              boxShadow: const [
-                                BoxShadow(
-                                  color: Color(0x66FF0000),
-                                  blurRadius: 24,
-                                  spreadRadius: 2,
-                                ),
-                              ],
-                            ),
-                            child: Image.asset(
-                              'assets/icon.png',
-                              fit: BoxFit.contain,
+                          builder: (context, scale, child) =>
+                              Transform.scale(scale: scale, child: child),
+                          child: TweenAnimationBuilder<double>(
+                            tween: Tween<double>(begin: 0.0, end: 1.0),
+                            duration: const Duration(milliseconds: 500),
+                            builder: (context, opacity, child) =>
+                                Opacity(opacity: opacity, child: child),
+                            child: Container(
+                              width: tileSize,
+                              height: tileSize,
+                              padding: EdgeInsets.all(tilePadding),
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                borderRadius: BorderRadius.circular(tileRadius),
+                                boxShadow: const [
+                                  BoxShadow(
+                                    color: Color(0x66FF0000),
+                                    blurRadius: 32,
+                                    spreadRadius: 4,
+                                  ),
+                                ],
+                              ),
+                              child: Image.asset(
+                                'assets/icon.png',
+                                fit: BoxFit.contain,
+                              ),
                             ),
                           ),
                         ),
                         SizedBox(height: titleGap),
-                        Text(
-                          'MediaTube',
-                          textAlign: TextAlign.center,
-                          style: textTheme.headlineSmall?.copyWith(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w700,
-                            letterSpacing: 0.4,
+                        TweenAnimationBuilder<double>(
+                          tween: Tween<double>(begin: 0.0, end: 1.0),
+                          duration: const Duration(milliseconds: 600),
+                          curve: const Interval(0.3, 1.0, curve: Curves.easeOut),
+                          builder: (context, opacity, child) =>
+                              Opacity(opacity: opacity, child: child),
+                          child: Text(
+                            'MediaTube',
+                            textAlign: TextAlign.center,
+                            style: textTheme.headlineSmall?.copyWith(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.6,
+                            ),
                           ),
                         ),
                         const SizedBox(height: 8),
-                        Text(
-                          'Fast media browsing and capture',
-                          textAlign: TextAlign.center,
-                          style: textTheme.bodyMedium?.copyWith(
-                            color: Colors.white.withAlpha(190),
-                            letterSpacing: 0.2,
+                        AnimatedBuilder(
+                          animation: _shimmerController,
+                          builder: (context, child) {
+                            return ShaderMask(
+                              shaderCallback: (bounds) {
+                                return LinearGradient(
+                                  begin: Alignment.centerLeft,
+                                  end: Alignment.centerRight,
+                                  colors: const [
+                                    Color(0x80FFFFFF),
+                                    Color(0xFFFFFFFF),
+                                    Color(0x80FFFFFF),
+                                  ],
+                                  stops: [
+                                    (_shimmerController.value - 0.3).clamp(0.0, 1.0),
+                                    _shimmerController.value,
+                                    (_shimmerController.value + 0.3).clamp(0.0, 1.0),
+                                  ],
+                                ).createShader(bounds);
+                              },
+                              child: child!,
+                            );
+                          },
+                          child: Text(
+                            'Fast media browsing and capture',
+                            textAlign: TextAlign.center,
+                            style: textTheme.bodyMedium?.copyWith(
+                              color: Colors.white.withAlpha(200),
+                              letterSpacing: 0.3,
+                            ),
                           ),
                         ),
                         const Spacer(flex: 3),
-                        Text(
-                          'Developed By Rajesh Biswas',
-                          textAlign: TextAlign.center,
-                          style: textTheme.bodyMedium?.copyWith(
-                            color: Colors.white.withAlpha(180),
-                            fontWeight: FontWeight.w600,
-                            letterSpacing: 0.6,
+                        TweenAnimationBuilder<double>(
+                          tween: Tween<double>(begin: 0.0, end: 1.0),
+                          duration: const Duration(milliseconds: 800),
+                          curve: const Interval(0.4, 1.0, curve: Curves.easeOut),
+                          builder: (context, opacity, child) =>
+                              Opacity(opacity: opacity, child: child),
+                          child: Text(
+                            'Developed By Rajesh Biswas',
+                            textAlign: TextAlign.center,
+                            style: textTheme.bodyMedium?.copyWith(
+                              color: Colors.white.withAlpha(160),
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.6,
+                            ),
                           ),
                         ),
                       ],
@@ -379,6 +511,9 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
   bool _updateCheckDone = false;
   DateTime _lastOpenUpdateCheckAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool _isOpenUpdateCheckRunning = false;
+  final List<String> _pendingSharedUrls = <String>[];
+  StreamSubscription<String>? _shareIntentSubscription;
+  bool _isProcessingSharedUrl = false;
 
   static const Duration _openUpdateCheckCooldown = Duration(seconds: 2);
 
@@ -392,6 +527,9 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
 
   @override
   void dispose() {
+    unawaited(_shareIntentSubscription?.cancel());
+    _shareIntentSubscription = null;
+    unawaited(ShareIntentService.instance.dispose());
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -445,114 +583,242 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
   }
 
   void _configureIntentHandling() {
-    // Listen for intent while app is running
-    ReceiveSharingIntent.instance.getMediaStream().listen(
-      (List<SharedMediaFile> value) {
-        if (value.isNotEmpty && value.first.path.isNotEmpty) {
-          _handleSharedContent(value.first.path);
-        }
-      },
-      onError: (err) {
-        debugPrint("Intent Error: $err");
-      },
-    );
+    unawaited(_shareIntentSubscription?.cancel());
+    _shareIntentSubscription = ShareIntentService.instance.sharedUrlStream
+        .listen(
+          (String sharedUrl) {
+            _enqueueSharedUrl(sharedUrl);
+          },
+          onError: (Object error, StackTrace stackTrace) {
+            debugPrint('Share intent listener error: $error');
+            debugPrint('$stackTrace');
+          },
+        );
 
-    // Check intent on app startup
-    ReceiveSharingIntent.instance.getInitialMedia().then((
-      List<SharedMediaFile> value,
-    ) {
-      if (value.isNotEmpty && value.first.path.isNotEmpty) {
-        _handleSharedContent(value.first.path);
+    unawaited(ShareIntentService.instance.initialize());
+  }
+
+  void _enqueueSharedUrl(String sharedUrl) {
+    final trimmed = sharedUrl.trim();
+    if (trimmed.isEmpty) {
+      return;
+    }
+
+    _pendingSharedUrls.add(trimmed);
+    if (!_isProcessingSharedUrl) {
+      unawaited(_drainPendingSharedUrls());
+    }
+  }
+
+  Future<void> _drainPendingSharedUrls() async {
+    if (_isProcessingSharedUrl) {
+      return;
+    }
+
+    _isProcessingSharedUrl = true;
+    try {
+      while (mounted && _pendingSharedUrls.isNotEmpty) {
+        final nextSharedUrl = _pendingSharedUrls.removeAt(0);
+        await _handleSharedContent(nextSharedUrl);
       }
-    });
+    } finally {
+      _isProcessingSharedUrl = false;
+    }
+  }
+
+  void _showShareStatus(
+    String message, {
+    bool isError = false,
+    bool isTransient = false,
+  }) {
+    if (!mounted) {
+      return;
+    }
+
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        behavior: SnackBarBehavior.floating,
+        duration: isTransient
+            ? const Duration(seconds: 45)
+            : const Duration(seconds: 2),
+        backgroundColor: isError ? Colors.red.shade700 : null,
+      ),
+    );
+  }
+
+  String _inferMediaFormat(String directMediaUrl) {
+    final uri = Uri.tryParse(directMediaUrl);
+    final path = uri?.path.toLowerCase() ?? directMediaUrl.toLowerCase();
+
+    if (path.endsWith('.m4a')) return 'm4a';
+    if (path.endsWith('.mp3')) return 'mp3';
+    if (path.endsWith('.webm')) return 'webm';
+    if (path.endsWith('.mov')) return 'mov';
+    if (path.endsWith('.mkv')) return 'mkv';
+    if (path.endsWith('.aac')) return 'aac';
+    if (path.endsWith('.ogg')) return 'ogg';
+
+    return 'mp4';
+  }
+
+  String _buildSharedMediaTitle(SupportedSharePlatform platform) {
+    final platformLabel = PlatformDetector.platformLabel(platform);
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    return '${platformLabel}_$timestamp';
+  }
+
+  Future<bool> _runShareFallbackFlow(
+    String url,
+    SupportedSharePlatform platform,
+  ) async {
+    if (!mounted) {
+      return false;
+    }
+
+    final settings = context.read<SettingsProvider>();
+    final downloadProvider = context.read<DownloadProvider>();
+    final fallbackAction =
+        settings.defaultShareAction == DefaultShareAction.autoAudio
+        ? DefaultShareAction.autoAudio
+        : DefaultShareAction.autoVideo;
+
+    if (platform == SupportedSharePlatform.youtube) {
+      try {
+        final ytService = YouTubeService();
+        final streams = await ytService
+            .getAvailableStreams(url)
+            .timeout(const Duration(seconds: 20));
+
+        final selected = _pickBestAutoMedia(streams, fallbackAction);
+        if (selected != null) {
+          await downloadProvider.startDownload(selected);
+          return true;
+        }
+      } catch (error) {
+        debugPrint('YouTube fallback extraction failed: $error');
+      }
+    }
+
+    try {
+      final socialStarted = await _tryAutoDownloadSharedSocial(
+        url: url,
+        action: fallbackAction,
+        downloadProvider: downloadProvider,
+      );
+      if (socialStarted) {
+        return true;
+      }
+    } catch (error) {
+      debugPrint('Social fallback extraction failed: $error');
+    }
+
+    if (mounted) {
+      context.read<BrowserProvider>().setPendingUrl(url);
+    }
+
+    return false;
   }
 
   Future<void> _handleSharedContent(String content) async {
-    debugPrint('Shared content received');
-    final url = ShareUrlService.normalizeSharedUrl(content);
-    if (url == null || !ShareUrlService.isSupportedWebUrl(url)) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Unsupported shared link format. Please share a web post URL.'),
-        ),
+    final normalizedInput =
+        ShareUrlService.normalizeSharedUrl(content) ?? content.trim();
+    final url = normalizedInput.trim();
+    if (url.isEmpty || !ShareUrlService.isSupportedWebUrl(url)) {
+      _showShareStatus(
+        'Could not extract media from this link.',
+        isError: true,
       );
       return;
     }
 
-    if (!mounted) return;
+    final platform = PlatformDetector.detect(url);
+    final extractor = PlatformDetector.extractorForUrl(url);
+    if (extractor == null || platform == SupportedSharePlatform.unsupported) {
+      if (mounted) {
+        context.read<BrowserProvider>().setPendingUrl(url);
+      }
+      _showShareStatus('Could not auto-extract. Open MediaTube to continue.');
+      return;
+    }
 
-    final settings = context.read<SettingsProvider>();
-    final downloadProvider = context.read<DownloadProvider>();
-    final action = settings.defaultShareAction;
+    _showShareStatus('Analyzing Link...', isTransient: true);
 
-    if (action != DefaultShareAction.alwaysAsk) {
-      // Headless auto-download execution
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            action == DefaultShareAction.autoVideo
-                ? 'Downloading Best Video...'
-                : 'Downloading Audio...',
-          ),
-          duration: const Duration(seconds: 2),
-        ),
+    try {
+      final directMediaUrl = await extractor
+          .extractDirectMediaUrl(url)
+          .timeout(const Duration(seconds: 35));
+
+      if (directMediaUrl == null ||
+          !ShareUrlService.isSupportedWebUrl(directMediaUrl)) {
+        final recovered = await _runShareFallbackFlow(url, platform);
+        if (recovered) {
+          if (mounted) {
+            _showShareStatus('Download Started');
+          }
+          _moveToBackgroundAfterDelay();
+          return;
+        }
+
+        _showShareStatus('Could not auto-extract. Open MediaTube to continue.');
+        return;
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      final downloadProvider = context.read<DownloadProvider>();
+      final media = DetectedMedia(
+        url: directMediaUrl,
+        title: _buildSharedMediaTitle(platform),
+        type: MediaType.video,
+        source: platform == SupportedSharePlatform.youtube
+            ? MediaSource.youtube
+            : MediaSource.generic,
+        quality: 'Best',
+        format: _inferMediaFormat(directMediaUrl),
+        isDash: false,
+        useBackend: false,
       );
 
-      final ytService = YouTubeService();
-      if (ytService.isValidYouTubeUrl(url)) {
-        try {
-          final streams = await ytService.getAvailableStreams(url);
-          if (streams.isNotEmpty && context.mounted) {
-            DetectedMedia selectedOption;
-            if (action == DefaultShareAction.autoVideo) {
-              // Pick highest quality video format (first non-audio-only)
-              selectedOption = streams.firstWhere(
-                (s) => s.type != MediaType.audio,
-                orElse: () => streams.first,
-              );
-            } else {
-              // Pick audio only
-              selectedOption = streams.firstWhere(
-                (s) => s.type == MediaType.audio,
-                orElse: () => streams.last, // fallback to lowest res
-              );
-            }
-            await downloadProvider.startDownload(selectedOption);
-            if (!mounted) return;
-            _moveToBackgroundAfterDelay();
-          }
-        } catch (e) {
-          debugPrint('Headless fetch failed: $e');
-          // If headless fails, fallback to UI
-          if (!mounted) return;
-          context.read<BrowserProvider>().setPendingUrl(url);
-        }
-      } else {
-        final started = await _tryAutoDownloadSharedSocial(
-          url: url,
-          action: action,
-          downloadProvider: downloadProvider,
-        );
-
-        if (!mounted) return;
-
-        if (started) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Auto download started from shared link'),
-              duration: Duration(seconds: 2),
-            ),
-          );
-          _moveToBackgroundAfterDelay();
-        } else {
-          // Fallback to browser sheet flow if quick auto mode cannot detect streams.
-          context.read<BrowserProvider>().setPendingUrl(url);
-        }
+      await downloadProvider.startDownload(media);
+      if (!mounted) {
+        return;
       }
-    } else {
-      // Always Ask - Set pending URL for BrowserScreen to handle
-      context.read<BrowserProvider>().setPendingUrl(url);
+
+      _showShareStatus('Download Started');
+      _moveToBackgroundAfterDelay();
+    } on TimeoutException catch (error, stackTrace) {
+      debugPrint('Share extraction timeout: $error');
+      debugPrint('$stackTrace');
+
+      final recovered = await _runShareFallbackFlow(url, platform);
+      if (recovered) {
+        if (mounted) {
+          _showShareStatus('Download Started');
+        }
+        _moveToBackgroundAfterDelay();
+        return;
+      }
+
+      _showShareStatus('Could not auto-extract. Open MediaTube to continue.');
+    } catch (error, stackTrace) {
+      debugPrint('Share extraction failed: $error');
+      debugPrint('$stackTrace');
+
+      final recovered = await _runShareFallbackFlow(url, platform);
+      if (recovered) {
+        if (mounted) {
+          _showShareStatus('Download Started');
+        }
+        _moveToBackgroundAfterDelay();
+        return;
+      }
+
+      _showShareStatus('Could not auto-extract. Open MediaTube to continue.');
     }
   }
 
@@ -629,7 +895,8 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
         add(uri.replace(scheme: 'https', host: 'm.facebook.com').toString());
         add(uri.replace(scheme: 'https', host: 'www.facebook.com').toString());
 
-        final watchId = uri.queryParameters['v'] ?? uri.queryParameters['video_id'];
+        final watchId =
+            uri.queryParameters['v'] ?? uri.queryParameters['video_id'];
         if (watchId != null && watchId.isNotEmpty) {
           add('https://m.facebook.com/watch/?v=$watchId');
         }
@@ -654,7 +921,9 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
       if (host.contains('x.com') || host.contains('twitter.com')) {
         add(uri.replace(scheme: 'https', host: 'x.com').toString());
 
-        final statusMatch = RegExp(r'^/([^/]+)/status/(\d+)').firstMatch(uri.path);
+        final statusMatch = RegExp(
+          r'^/([^/]+)/status/(\d+)',
+        ).firstMatch(uri.path);
         if (statusMatch != null) {
           add(
             'https://x.com/${statusMatch.group(1)}/status/${statusMatch.group(2)}',

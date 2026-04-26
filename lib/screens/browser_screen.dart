@@ -102,26 +102,33 @@ class _BrowserScreenState extends State<BrowserScreen>
   bool _wasVideoPlayingBeforeBackground = false;
   bool _nativeBackgroundHandoffInProgress = false;
   String? _lastNativeBackgroundHandoffVideoId;
-  DateTime _lastNativeBackgroundHandoffAt =
-      DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastNativeBackgroundHandoffAt = DateTime.fromMillisecondsSinceEpoch(
+    0,
+  );
   int? _androidSdkInt;
   bool _androidSdkLookupInProgress = false;
 
   static const Duration _backgroundPlaybackTickInterval = Duration(seconds: 6);
-  static const Duration _foregroundIntentPollInterval = Duration(milliseconds: 1200);
-  static const Duration _backgroundLifecycleDebounce = Duration(milliseconds: 180);
-  static const Duration _nativeBackgroundHandoffCooldown = Duration(seconds: 25);
+  static const Duration _foregroundIntentPollInterval = Duration(
+    milliseconds: 1200,
+  );
+  static const Duration _backgroundLifecycleDebounce = Duration(
+    milliseconds: 180,
+  );
+  static const Duration _nativeBackgroundHandoffCooldown = Duration(
+    seconds: 25,
+  );
   static const int _maxNoPlaybackDetectionsBeforeStop = 3;
 
   SharedPreferences? _cachedPrefs;
 
   final BackgroundDownloadService _backgroundService =
       BackgroundDownloadService();
-    final AndroidPlaybackBridgeService _nativePlaybackBridge =
+  final AndroidPlaybackBridgeService _nativePlaybackBridge =
       AndroidPlaybackBridgeService();
-    final YouTubeService _backgroundYouTubeService = YouTubeService();
+  final YouTubeService _backgroundYouTubeService = YouTubeService();
   bool _playbackForegroundProtectionEnabled = false;
-    bool _browserPipConfigured = false;
+  bool _browserPipConfigured = false;
 
   int _profileFrameSampleCount = 0;
   int _profileJankyFrameCount = 0;
@@ -153,6 +160,7 @@ class _BrowserScreenState extends State<BrowserScreen>
       await controller.setSettings(
         settings: InAppWebViewSettings(
           useShouldInterceptRequest: shouldEnable,
+          allowBackgroundAudioPlaying: true,
         ),
       );
     } catch (e) {
@@ -293,7 +301,8 @@ class _BrowserScreenState extends State<BrowserScreen>
 
     if (state == AppLifecycleState.resumed) {
       final hadBackgroundLoop =
-          _backgroundPlaybackTimer != null || _backgroundPlaybackAutomationInProgress;
+          _backgroundPlaybackTimer != null ||
+          _backgroundPlaybackAutomationInProgress;
       _stopBackgroundPlaybackAutomationLoop();
       _isCapturingPlaybackIntentForBackground = false;
       _startForegroundPlaybackIntentPolling();
@@ -318,7 +327,9 @@ class _BrowserScreenState extends State<BrowserScreen>
   }
 
   Future<void> _ensureAndroidSdkInt() async {
-    if (!Platform.isAndroid || _androidSdkInt != null || _androidSdkLookupInProgress) {
+    if (!Platform.isAndroid ||
+        _androidSdkInt != null ||
+        _androidSdkLookupInProgress) {
       return;
     }
 
@@ -420,10 +431,10 @@ class _BrowserScreenState extends State<BrowserScreen>
 
     try {
       await _nativePlaybackBridge.configurePip(
-        enabled: enabled,
+        enabled: false,
         aspectWidth: 16,
         aspectHeight: 9,
-        autoEnter: enabled,
+        autoEnter: false,
       );
       _browserPipConfigured = enabled;
     } catch (e) {
@@ -436,13 +447,8 @@ class _BrowserScreenState extends State<BrowserScreen>
       return false;
     }
 
-    await _configureBrowserPip(enabled: true);
-    try {
-      return await _nativePlaybackBridge.enterPipNow();
-    } catch (e) {
-      debugPrint('Browser PiP handoff failed: $e');
-      return false;
-    }
+    await _configureBrowserPip(enabled: false);
+    return false;
   }
 
   bool _shouldUseNativeYouTubeBackgroundFallback() {
@@ -496,21 +502,23 @@ class _BrowserScreenState extends State<BrowserScreen>
   }
 
   int _extractResolutionScore(String quality) {
-    final match = RegExp(r'(\d{3,4})p', caseSensitive: false)
-        .firstMatch(quality);
+    final match = RegExp(
+      r'(\d{3,4})p',
+      caseSensitive: false,
+    ).firstMatch(quality);
     return match == null ? 0 : int.tryParse(match.group(1) ?? '') ?? 0;
   }
 
   int _extractBitrateScore(String quality) {
-    final match = RegExp(r'(\d{2,4})\s*kbps', caseSensitive: false)
-        .firstMatch(quality);
+    final match = RegExp(
+      r'(\d{2,4})\s*kbps',
+      caseSensitive: false,
+    ).firstMatch(quality);
     return match == null ? 0 : int.tryParse(match.group(1) ?? '') ?? 0;
   }
 
   DetectedMedia? _pickBackgroundPlayableVideo(Iterable<DetectedMedia> media) {
-    final directVideos = media
-        .where(_isDirectBackgroundPlayableVideo)
-        .toList();
+    final directVideos = media.where(_isDirectBackgroundPlayableVideo).toList();
 
     if (directVideos.isEmpty) {
       return null;
@@ -622,7 +630,8 @@ class _BrowserScreenState extends State<BrowserScreen>
         return;
       }
 
-      final handoffVideoId = media.videoId ??
+      final handoffVideoId =
+          media.videoId ??
           _backgroundYouTubeService.extractVideoId(
             _browserProviderRef?.currentUrl ?? _currentUrl,
           );
@@ -668,8 +677,9 @@ class _BrowserScreenState extends State<BrowserScreen>
 
     try {
       await _injectPlaybackIntentHooksIfNeeded();
-      final result = await controller.evaluateJavascript(
-        source: '''
+      final result = await controller
+          .evaluateJavascript(
+            source: '''
           (() => {
             const videos = Array.from(document.querySelectorAll('video'));
             let shouldContinue = false;
@@ -696,9 +706,14 @@ class _BrowserScreenState extends State<BrowserScreen>
                 return;
               }
 
+              const jsPauseTime = parseInt(video.dataset.mtJsPauseTime || '0', 10);
+              const timeSinceJsPause = Date.now() - jsPauseTime;
+              const isJsInitiated = timeSinceJsPause < 1000;
+
               const hasProgress = (video.currentTime || 0) > 0;
-              if (pageHidden && hasProgress) {
-                // Page-hidden pauses are often system/lifecycle pauses, not user intent.
+              if ((pageHidden || !isJsInitiated) && hasProgress) {
+                // Background pauses mostly happen without JS explicitly calling video.pause().
+                // It's a native pause. Preserve playing intent.
                 video.dataset.mtUserIntent = 'play';
                 video.dataset.mtBackgroundPlay = 'true';
                 shouldContinue = true;
@@ -708,16 +723,18 @@ class _BrowserScreenState extends State<BrowserScreen>
             return shouldContinue;
           })();
         ''',
-      ).timeout(
-        const Duration(milliseconds: 550),
-        onTimeout: () => _lastForegroundPlaybackIntentPlay,
-      );
+          )
+          .timeout(
+            const Duration(milliseconds: 550),
+            onTimeout: () => _lastForegroundPlaybackIntentPlay,
+          );
 
       shouldContinue = result == true || result?.toString() == 'true';
     } catch (e) {
       // Fall back to cached foreground intent for fast background transitions.
       shouldContinue =
-          _lastForegroundPlaybackIntentPlay || _playbackForegroundProtectionEnabled;
+          _lastForegroundPlaybackIntentPlay ||
+          _playbackForegroundProtectionEnabled;
       debugPrint('Failed to capture playback intent: $e');
     }
 
@@ -733,9 +750,7 @@ class _BrowserScreenState extends State<BrowserScreen>
         unawaited(_attemptNativeYouTubeBackgroundHandoff());
       }
 
-      unawaited(
-        _activateBackgroundPlaybackAutomation(usePlaybackDelay: true),
-      );
+      unawaited(_activateBackgroundPlaybackAutomation(usePlaybackDelay: true));
     } else {
       // Video was paused by user — don't start background playback,
       // but do stop any existing foreground protection.
@@ -962,6 +977,12 @@ class _BrowserScreenState extends State<BrowserScreen>
 
             window.__mediaTubeIntentHooked = true;
 
+            const originalPause = HTMLMediaElement.prototype.pause;
+            HTMLMediaElement.prototype.pause = function() {
+              this.dataset.mtJsPauseTime = Date.now().toString();
+              return originalPause.apply(this, arguments);
+            };
+
             const markIntentFromState = (video) => {
               try {
                 const pageHidden = document.hidden || document.visibilityState === 'hidden';
@@ -979,8 +1000,13 @@ class _BrowserScreenState extends State<BrowserScreen>
                 }
 
                 if (video.dataset.mtUserIntent === 'play') {
-                  // Keep play intent when pause happens while app/page is hidden.
-                  if (pageHidden || (video.currentTime || 0) > 0) {
+                  const jsPauseTime = parseInt(video.dataset.mtJsPauseTime || '0', 10);
+                  const timeSinceJsPause = Date.now() - jsPauseTime;
+                  const isJsInitiated = timeSinceJsPause < 1000;
+                  
+                  // Keep play intent when pause happens while app/page is hidden,
+                  // or if it was definitely a native system pause (not from JS).
+                  if (pageHidden || !isJsInitiated || (video.currentTime || 0) > 0) {
                     video.dataset.mtBackgroundPlay = 'true';
                     return;
                   }
@@ -1012,8 +1038,12 @@ class _BrowserScreenState extends State<BrowserScreen>
                     const pageHidden =
                       document.hidden || document.visibilityState === 'hidden';
 
-                    if (pageHidden && video.dataset.mtUserIntent === 'play') {
-                      // Keep intent if pause was caused by lifecycle/backgrounding.
+                    const jsPauseTime = parseInt(video.dataset.mtJsPauseTime || '0', 10);
+                    const timeSinceJsPause = Date.now() - jsPauseTime;
+                    const isJsInitiated = timeSinceJsPause < 1000;
+
+                    if ((pageHidden || !isJsInitiated) && video.dataset.mtUserIntent === 'play') {
+                      // Keep intent if pause was caused by native/lifecycle interruption, not JS user tap.
                       video.dataset.mtBackgroundPlay = 'true';
                       return;
                     }
@@ -1177,7 +1207,8 @@ class _BrowserScreenState extends State<BrowserScreen>
 
     try {
       await controller.evaluateJavascript(
-        source: '''
+        source:
+            '''
           (() => {
             const delayMs = $effectiveDelayMs;
 
@@ -1367,7 +1398,8 @@ class _BrowserScreenState extends State<BrowserScreen>
       // Retry once automatically if no streams are found from the first pass.
       Future.delayed(const Duration(milliseconds: 1600), () {
         if (!mounted) return;
-        if (browserProvider.hasDetectedMedia || browserProvider.isFetchingMedia) {
+        if (browserProvider.hasDetectedMedia ||
+            browserProvider.isFetchingMedia) {
           return;
         }
         unawaited(
@@ -1420,9 +1452,7 @@ class _BrowserScreenState extends State<BrowserScreen>
   bool _isChromeVisible = true;
   Timer? _chromeAutoHideTimer;
 
-  void _scheduleChromeAutoHide({
-    Duration delay = const Duration(seconds: 3),
-  }) {
+  void _scheduleChromeAutoHide({Duration delay = const Duration(seconds: 3)}) {
     _chromeAutoHideTimer?.cancel();
 
     if (_showHomePage || _isUrlBarVisible) {
@@ -1476,7 +1506,9 @@ class _BrowserScreenState extends State<BrowserScreen>
     if (normalizedUrl == null) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Only valid http/https URLs are allowed.')),
+        const SnackBar(
+          content: Text('Only valid http/https URLs are allowed.'),
+        ),
       );
       return;
     }
@@ -1507,11 +1539,7 @@ class _BrowserScreenState extends State<BrowserScreen>
 
           return Stack(
             children: [
-              Positioned.fill(
-                child: SafeArea(
-                  child: _buildWebView(),
-                ),
-              ),
+              Positioned.fill(child: SafeArea(child: _buildWebView())),
               if (_isOmniMenuExpanded || _omniMenuController.value > 0)
                 Positioned.fill(
                   child: IgnorePointer(
@@ -1591,11 +1619,8 @@ class _BrowserScreenState extends State<BrowserScreen>
             _collapseOmniMenu();
           }
         },
-        onPanUpdate: (details) => _onOmniFabDragged(
-          details,
-          viewport,
-          safePadding,
-        ),
+        onPanUpdate: (details) =>
+            _onOmniFabDragged(details, viewport, safePadding),
         onPanEnd: (_) => _persistFloatingButtonPositions(),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
@@ -1671,9 +1696,7 @@ class _BrowserScreenState extends State<BrowserScreen>
 
     for (var i = 0; i < actions.length; i++) {
       final step = (i + 1) * (_omniActionHeight + 10);
-      final rawTargetTop = expandsDownward
-          ? baseTop + step
-          : baseTop - step;
+      final rawTargetTop = expandsDownward ? baseTop + step : baseTop - step;
       final targetTop = rawTargetTop
           .clamp(
             safePadding.top + 8,
@@ -1684,11 +1707,7 @@ class _BrowserScreenState extends State<BrowserScreen>
       final intervalStart = (i * 0.1).clamp(0.0, 0.6).toDouble();
       final itemAnimation = CurvedAnimation(
         parent: _omniMenuController,
-        curve: Interval(
-          intervalStart,
-          1,
-          curve: Curves.easeOutBack,
-        ),
+        curve: Interval(intervalStart, 1, curve: Curves.easeOutBack),
       );
 
       items.add(
@@ -1704,10 +1723,7 @@ class _BrowserScreenState extends State<BrowserScreen>
                 opacity: t,
                 child: Transform.scale(
                   scale: 0.85 + (0.15 * t),
-                  child: IgnorePointer(
-                    ignoring: t < 0.95,
-                    child: child,
-                  ),
+                  child: IgnorePointer(ignoring: t < 0.95, child: child),
                 ),
               ),
             );
@@ -1864,8 +1880,10 @@ class _BrowserScreenState extends State<BrowserScreen>
       viewport.height - safePadding.vertical - controlSize - 16,
     );
 
-    final x = safePadding.left + 8 + normalized.dx.clamp(0.0, 1.0) * usableWidth;
-    final y = safePadding.top + 8 + normalized.dy.clamp(0.0, 1.0) * usableHeight;
+    final x =
+        safePadding.left + 8 + normalized.dx.clamp(0.0, 1.0) * usableWidth;
+    final y =
+        safePadding.top + 8 + normalized.dy.clamp(0.0, 1.0) * usableHeight;
     return Offset(x.toDouble(), y.toDouble());
   }
 
@@ -1956,11 +1974,8 @@ class _BrowserScreenState extends State<BrowserScreen>
       left: position.dx,
       top: position.dy,
       child: GestureDetector(
-        onPanUpdate: (details) => _onStreamFabDragged(
-          details,
-          viewport,
-          safePadding,
-        ),
+        onPanUpdate: (details) =>
+            _onStreamFabDragged(details, viewport, safePadding),
         onPanEnd: (_) => _persistFloatingButtonPositions(),
         onTap: () {
           if (isFetchingMedia) {
@@ -1985,8 +2000,8 @@ class _BrowserScreenState extends State<BrowserScreen>
                 ? _streamPulseController.value
                 : 0.0;
             final scale = 1 + (0.12 * pulse);
-            final color = Color.lerp(baseColor, Colors.white, 0.16 * pulse) ??
-                baseColor;
+            final color =
+                Color.lerp(baseColor, Colors.white, 0.16 * pulse) ?? baseColor;
 
             return Transform.scale(
               scale: scale,
@@ -2125,7 +2140,9 @@ class _BrowserScreenState extends State<BrowserScreen>
                         ),
                         const Spacer(),
                         IconButton(
-                          tooltip: _isUrlBarVisible ? 'Hide address bar' : 'Search or URL',
+                          tooltip: _isUrlBarVisible
+                              ? 'Hide address bar'
+                              : 'Search or URL',
                           icon: Icon(
                             _isUrlBarVisible ? Icons.close : Icons.search,
                           ),
@@ -2267,7 +2284,9 @@ class _BrowserScreenState extends State<BrowserScreen>
                       }
                       _showChrome();
                     },
-                    icon: Icon(isLoading ? Icons.close_rounded : Icons.refresh_rounded),
+                    icon: Icon(
+                      isLoading ? Icons.close_rounded : Icons.refresh_rounded,
+                    ),
                   ),
                   Consumer<DownloadProvider>(
                     builder: (context, downloadProvider, _) {
@@ -2436,6 +2455,7 @@ class _BrowserScreenState extends State<BrowserScreen>
               supportMultipleWindows: false,
               mediaPlaybackRequiresUserGesture: false,
               allowsInlineMediaPlayback: true,
+              allowBackgroundAudioPlaying: true,
               useShouldInterceptRequest: _requestInterceptionEnabled,
               useWideViewPort: true,
               loadWithOverviewMode: true,
@@ -2661,12 +2681,14 @@ class _BrowserScreenState extends State<BrowserScreen>
               if (url.isEmpty) return null;
 
               String? contentTypeHint;
-              final acceptHeader = request.headers?['Accept'] ?? request.headers?['accept'];
+              final acceptHeader =
+                  request.headers?['Accept'] ?? request.headers?['accept'];
               if (acceptHeader != null && acceptHeader.isNotEmpty) {
                 contentTypeHint = acceptHeader;
               }
 
-              final fetchDest = request.headers?['Sec-Fetch-Dest'] ??
+              final fetchDest =
+                  request.headers?['Sec-Fetch-Dest'] ??
                   request.headers?['sec-fetch-dest'];
               if (fetchDest == 'video') {
                 contentTypeHint = 'video/mp4';
@@ -2716,10 +2738,7 @@ class _BrowserScreenState extends State<BrowserScreen>
     _urlController.text = '';
   }
 
-  Widget _buildUrlBar({
-    required String currentUrl,
-    required int tabCount,
-  }) {
+  Widget _buildUrlBar({required String currentUrl, required int tabCount}) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
       child: Row(
@@ -2737,9 +2756,13 @@ class _BrowserScreenState extends State<BrowserScreen>
                 children: [
                   const SizedBox(width: 12),
                   Icon(
-                    currentUrl.startsWith('https') ? Icons.search : Icons.language,
+                    currentUrl.startsWith('https')
+                        ? Icons.search
+                        : Icons.language,
                     size: 18,
-                    color: currentUrl.startsWith('https') ? null : Colors.orange,
+                    color: currentUrl.startsWith('https')
+                        ? null
+                        : Colors.orange,
                   ),
                   const SizedBox(width: 8),
                   Expanded(
@@ -2932,7 +2955,12 @@ class _CachedMediaSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     return Selector<
       BrowserProvider,
-      ({int mediaVersion, bool isYouTube, bool isFetching, String? errorMessage})
+      ({
+        int mediaVersion,
+        bool isYouTube,
+        bool isFetching,
+        String? errorMessage,
+      })
     >(
       selector: (_, browserProvider) {
         return (

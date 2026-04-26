@@ -52,6 +52,9 @@ class MediaSnifferService {
     '.js',
     'fonts.googleapis',
   ];
+  static final RegExp _ignorePatternMatcher = RegExp(
+    _ignorePatterns.map(RegExp.escape).join('|'),
+  );
 
   /// Check if URL contains a detectable media file
   DetectedMedia? detectMedia(
@@ -72,11 +75,9 @@ class MediaSnifferService {
       return null;
     }
 
-    // Skip ignored patterns
-    for (final pattern in _ignorePatterns) {
-      if (lowerUrl.contains(pattern)) {
-        return null;
-      }
+    // Skip ignored patterns quickly using one precompiled matcher.
+    if (_ignorePatternMatcher.hasMatch(lowerUrl)) {
+      return null;
     }
 
     // Check for video files

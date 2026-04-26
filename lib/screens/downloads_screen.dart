@@ -89,11 +89,6 @@ class _DownloadsScreenState extends State<DownloadsScreen>
             child: AnimatedBuilder(
               animation: _castService,
               builder: (context, _) {
-                final provider = context.watch<DownloadProvider>();
-                final completedVideos = provider.completedDownloads
-                    .where((task) => !task.isAudioOnly)
-                    .toList();
-
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -193,36 +188,63 @@ class _DownloadsScreenState extends State<DownloadsScreen>
                     ),
                     SizedBox(
                       height: 230,
-                      child: completedVideos.isEmpty
-                          ? const Center(child: Text('No completed videos yet'))
-                          : ListView.builder(
-                              itemCount: completedVideos.length,
-                              itemBuilder: (context, index) {
-                                final task = completedVideos[index];
-                                final connected = _castService.connectedDevice;
+                      child: Selector<DownloadProvider, List<DownloadTask>>(
+                        selector: (_, provider) => provider.completedDownloads
+                            .where((task) => !task.isAudioOnly)
+                            .toList(growable: false),
+                        shouldRebuild: (prev, next) {
+                          if (prev.length != next.length) {
+                            return true;
+                          }
 
-                                return ListTile(
-                                  leading: const Icon(Icons.play_circle_outline),
-                                  title: Text(
-                                    task.fileName,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                  subtitle: Text(task.totalSizeFormatted),
-                                  trailing: IconButton(
-                                    tooltip: connected == null
-                                        ? 'Connect a display first'
-                                        : 'Cast video',
-                                    onPressed: connected == null
-                                        ? null
-                                        : () {
-                                            unawaited(_castDownload(task));
-                                          },
-                                    icon: const Icon(Icons.cast),
-                                  ),
-                                );
-                              },
-                            ),
+                          for (var i = 0; i < prev.length; i++) {
+                            if (prev[i].id != next[i].id ||
+                                prev[i].status != next[i].status ||
+                                prev[i].savePath != next[i].savePath) {
+                              return true;
+                            }
+                          }
+
+                          return false;
+                        },
+                        builder: (context, completedVideos, _) {
+                          if (completedVideos.isEmpty) {
+                            return const Center(
+                              child: Text('No completed videos yet'),
+                            );
+                          }
+
+                          return ListView.builder(
+                            itemCount: completedVideos.length,
+                            itemBuilder: (context, index) {
+                              final task = completedVideos[index];
+                              final connected = _castService.connectedDevice;
+
+                              return ListTile(
+                                key: ValueKey(task.id),
+                                leading: const Icon(Icons.play_circle_outline),
+                                title: Text(
+                                  task.fileName,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                                subtitle: Text(task.totalSizeFormatted),
+                                trailing: IconButton(
+                                  tooltip: connected == null
+                                      ? 'Connect a display first'
+                                      : 'Cast video',
+                                  onPressed: connected == null
+                                      ? null
+                                      : () {
+                                          unawaited(_castDownload(task));
+                                        },
+                                  icon: const Icon(Icons.cast),
+                                ),
+                              );
+                            },
+                          );
+                        },
+                      ),
                     ),
                   ],
                 );
@@ -736,9 +758,12 @@ class _DownloadItem extends StatelessWidget {
   void _shareFile(BuildContext context, String path) async {
     final file = File(path);
     if (await file.exists()) {
-      Share.shareXFiles([
-        XFile(path),
-      ], text: 'Check out this media file downloaded from MediaTube!');
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(path)],
+          text: 'Check out this media file downloaded from MediaTube!',
+        ),
+      );
     } else if (context.mounted) {
       ScaffoldMessenger.of(
         context,
@@ -961,7 +986,7 @@ class _ActiveDownloadsTab extends StatelessWidget {
         }
         return false;
       },
-      builder: (context, _, __) {
+      builder: (context, ignored, child) {
         final provider = context.read<DownloadProvider>();
         final downloads = [
           ...provider.activeDownloads,
@@ -1016,7 +1041,7 @@ class _HistoryDownloadsTab extends StatelessWidget {
         }
         return false;
       },
-      builder: (context, _, __) {
+      builder: (context, ignored, child) {
         final provider = context.read<DownloadProvider>();
         return _buildGroupedDownloadsList(
           provider.allDownloadsHistory,

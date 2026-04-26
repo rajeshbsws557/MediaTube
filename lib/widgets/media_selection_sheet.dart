@@ -781,6 +781,24 @@ class _MediaListItem extends StatefulWidget {
 
 class _MediaListItemState extends State<_MediaListItem> {
   bool _isDownloading = false;
+  static const int _maxThumbnailProviderEntries = 120;
+  static final Map<String, ImageProvider> _thumbnailProviderCache =
+      <String, ImageProvider>{};
+
+  ImageProvider _cachedThumbnailProvider(String url) {
+    final cached = _thumbnailProviderCache[url];
+    if (cached != null) {
+      return cached;
+    }
+
+    if (_thumbnailProviderCache.length >= _maxThumbnailProviderEntries) {
+      _thumbnailProviderCache.remove(_thumbnailProviderCache.keys.first);
+    }
+
+    final provider = NetworkImage(url);
+    _thumbnailProviderCache[url] = provider;
+    return provider;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -853,12 +871,15 @@ class _MediaListItemState extends State<_MediaListItem> {
       child: widget.media.thumbnailUrl != null
           ? ClipRRect(
               borderRadius: BorderRadius.circular(8),
-              child: Image.network(
-                widget.media.thumbnailUrl!,
+              child: Image(
+                image: ResizeImage(
+                  _cachedThumbnailProvider(widget.media.thumbnailUrl!),
+                  width: 112,
+                  height: 112,
+                ),
                 fit: BoxFit.cover,
-                cacheWidth: 112,
-                cacheHeight: 112,
                 filterQuality: FilterQuality.low,
+                gaplessPlayback: true,
                 loadingBuilder: (context, child, loadingProgress) {
                   if (loadingProgress == null) return child;
                   return Center(

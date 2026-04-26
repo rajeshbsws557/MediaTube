@@ -333,6 +333,33 @@ class DownloadService {
 
       // Non-YouTube sources - direct download
       debugPrint('Using direct download for non-YouTube source');
+      if (media.format == 'm3u8' || media.format == 'mpd') {
+        debugPrint('🌐 Using backend server for m3u8/mpd stream download');
+        await _backendService.downloadDirect(
+          task,
+          media,
+          savePath: task.savePath,
+          onProgress: (t) {
+            _updateNotification(
+              'Downloading ${media.title}',
+              '${(t.progress * 100).toInt()}%',
+              t.progress,
+            );
+            onProgress?.call(t);
+          },
+          onComplete: (t) {
+            _cleanup(task.id);
+            onComplete?.call(t);
+          },
+          onError: (t) {
+            _cleanup(task.id);
+            onError?.call(t);
+          },
+          cancelToken: backendCancelToken,
+        );
+        return;
+      }
+      
       task = await _downloadSingleFileResumable(task, (t) {
         _updateNotification(
           'Downloading ${media.title}',

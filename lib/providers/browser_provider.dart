@@ -1,8 +1,10 @@
 import 'dart:collection';
 import 'package:flutter/foundation.dart';
 import 'dart:async';
+import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/models.dart';
 import '../services/services.dart';
 
@@ -15,12 +17,97 @@ class BrowserProvider extends ChangeNotifier {
   final ProcessNotificationService _processNotifications =
       ProcessNotificationService();
 
-  final List<BrowserTab> _tabs = [BrowserTab(url: 'https://m.youtube.com')];
+  static const String _tabsPrefsKey = 'browser_tabs_session';
+  static const String _activeTabPrefsKey = 'browser_active_tab_index';
+  static const String _bookmarksPrefsKey = 'browser_bookmarks';
+  static const String _autoClearOnExitPrefsKey = 'privacy_auto_clear_on_exit';
+
+  SharedPreferences? _cachedPrefs;
+  Timer? _tabSaveDebounce;
+  Timer? _bookmarkSaveDebounce;
+  bool _tabSaveInFlight = false;
+  bool _bookmarkSaveInFlight = false;
+  static const Duration _tabSaveDebounceDelay = Duration(milliseconds: 500);
+
+  final List<BrowserTab> _tabs = [];
   int _activeTabIndex = 0;
+
+  // Bookmarks
+  final List<Bookmark> _bookmarks = [];
+
+  // Privacy tracking
+  int _trackersBlockedCount = 0;
+  bool _autoClearOnExit = false;
 
   bool _isLoading = false;
   bool _canGoBack = false;
   bool _canGoForward = false;
+
+  BrowserProvider() {
+    _loadSessionTabs();
+    _loadBookmarks();
+    _loadPrivacySettings();
+  }
+
+  Future<void> _loadSessionTabs() async {
+    try {
+      _cachedPrefs ??= await SharedPreferences.getInstance();
+      final prefs = _cachedPrefs!;
+      final tabsJson = prefs.getString(_tabsPrefsKey);
+      final activeIndex = prefs.getInt(_activeTabPrefsKey) ?? 0;
+
+      if (tabsJson != null && tabsJson.isNotEmpty) {
+        final List<dynamic> decoded = jsonDecode(tabsJson);
+        for (final item in decoded) {
+          _tabs.add(BrowserTab.fromMap(item as Map<String, dynamic>));
+        }
+      }
+
+      if (_tabs.isEmpty) {
+        _tabs.add(BrowserTab(url: 'https://m.youtube.com'));
+      }
+
+      _activeTabIndex = (activeIndex >= 0 && activeIndex < _tabs.length) ? activeIndex : 0;
+      
+      // Sync initial state based on active tab
+      final currentUrl = _tabs[_activeTabIndex].url;
+      _isYouTubePage = _snifferService.isYouTubeUrl(currentUrl);
+      _isSocialVideoPage = _snifferService.isSupportedSocialVideoUrl(currentUrl);
+
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Failed to load browser session tabs: $e');
+      if (_tabs.isEmpty) {
+        _tabs.add(BrowserTab(url: 'https://m.youtube.com'));
+        _activeTabIndex = 0;
+        notifyListeners();
+      }
+    }
+  }
+
+  void _saveSessionTabs() {
+    // Debounce to avoid saving on every keystroke / URL change
+    _tabSaveDebounce?.cancel();
+    _tabSaveDebounce = Timer(_tabSaveDebounceDelay, () {
+      unawaited(_saveSessionTabsImmediate());
+    });
+  }
+
+  Future<void> _saveSessionTabsImmediate() async {
+    if (_tabSaveInFlight) return;
+    _tabSaveInFlight = true;
+    try {
+      _cachedPrefs ??= await SharedPreferences.getInstance();
+      final prefs = _cachedPrefs!;
+      final List<Map<String, dynamic>> tabsData = _tabs.map((t) => t.toMap()).toList();
+      await prefs.setString(_tabsPrefsKey, jsonEncode(tabsData));
+      await prefs.setInt(_activeTabPrefsKey, _activeTabIndex);
+    } catch (e) {
+      debugPrint('Failed to save browser session tabs: $e');
+    } finally {
+      _tabSaveInFlight = false;
+    }
+  }
 
   // Detected media
   final List<DetectedMedia> _detectedMedia = [];
@@ -32,6 +119,7 @@ class BrowserProvider extends ChangeNotifier {
   bool _isFetchingGeneric = false;
   String? _fetchError;
   int _mediaStateVersion = 0;
+  int _lastNotifiedMediaStateVersion = -1;
 
   // Track current YouTube video to detect navigation within YouTube
   String? _currentYouTubeVideoId;
@@ -42,7 +130,12 @@ class BrowserProvider extends ChangeNotifier {
 
   // PERSISTENT cache - survives sheet open/close, holds multiple videos
   static final Map<String, List<DetectedMedia>> _streamCache = {};
+    static final Map<String, DateTime> _streamCacheLastAccess =
+      <String, DateTime>{};
+    static final Map<String, DateTime> _streamCacheWrittenAt =
+      <String, DateTime>{};
   static const int _maxCacheSize = 50; // Increased cache for more videos
+    static const Duration _streamCacheTtl = Duration(minutes: 45);
   static const int _maxDetectedMediaItems = 12;
   static const Set<String> _volatileSegmentParams = {
     'bytestart',
@@ -129,11 +222,18 @@ class BrowserProvider extends ChangeNotifier {
   bool get isFetchingYouTube => _isFetchingYouTube;
   bool get isFetchingGeneric => _isFetchingGeneric;
   bool get isFetchingMedia => _isFetchingYouTube || _isFetchingGeneric;
-  bool get shouldObserveNetworkMedia =>
-      _isSocialVideoPage || _isFetchingGeneric;
+  bool get shouldObserveNetworkMedia => !_isYouTubePage;
   String? get fetchError => _fetchError;
   bool get hasFetchError => _fetchError != null;
   int get mediaStateVersion => _mediaStateVersion;
+
+  // Bookmark getters
+  List<Bookmark> get bookmarks => List.unmodifiable(_bookmarks);
+  bool get hasBookmarks => _bookmarks.isNotEmpty;
+
+  // Privacy getters
+  int get trackersBlockedCount => _trackersBlockedCount;
+  bool get autoClearOnExit => _autoClearOnExit;
 
   /// Returns the next pending URL or null if the queue is empty.
   String? get pendingUrl => _pendingUrls.isNotEmpty ? _pendingUrls.first : null;
@@ -160,9 +260,14 @@ class BrowserProvider extends ChangeNotifier {
   }
 
   void setCurrentUrl(String url) {
+    _setCurrentUrlInternal(url, save: true);
+  }
+
+  void _setCurrentUrlInternal(String url, {bool save = true}) {
     if (url == _tabs[_activeTabIndex].url) return;
 
     _tabs[_activeTabIndex].url = url;
+    if (save) _saveSessionTabs();
 
     // Check if this is a YouTube page
     final wasYouTube = _isYouTubePage;
@@ -182,8 +287,10 @@ class BrowserProvider extends ChangeNotifier {
       _fetchError = null;
 
       // INSTANT loading from cache - no fetch needed!
-      if (newVideoId != null && _streamCache.containsKey(newVideoId)) {
-        _appendDetectedMedia(_streamCache[newVideoId]!);
+      final cachedStreams =
+          newVideoId == null ? null : _readStreamCache(newVideoId);
+      if (cachedStreams != null) {
+        _appendDetectedMedia(cachedStreams);
         notifyListeners();
         return;
       }
@@ -219,6 +326,7 @@ class BrowserProvider extends ChangeNotifier {
     }
     _tabs[_activeTabIndex].title = title;
     notifyListeners();
+    _saveSessionTabs();
   }
 
   // --- Tab Management API ---
@@ -228,6 +336,7 @@ class BrowserProvider extends ChangeNotifier {
     _clearDetectedMedia();
     _fetchError = null;
     notifyListeners();
+    _saveSessionTabs();
   }
 
   void switchTab(int index) {
@@ -236,8 +345,10 @@ class BrowserProvider extends ChangeNotifier {
       _clearDetectedMedia();
       _fetchError = null;
       notifyListeners();
+      _saveSessionTabs();
       // Need to re-trigger detect logic for the new active tab's URL
-      setCurrentUrl(_tabs[_activeTabIndex].url);
+      // We pass save: false inside setCurrentUrl to avoid double saving since we already saved
+      _setCurrentUrlInternal(_tabs[_activeTabIndex].url, save: false);
     }
   }
 
@@ -247,19 +358,27 @@ class BrowserProvider extends ChangeNotifier {
       _tabs[0] = BrowserTab(url: 'https://m.youtube.com');
       _clearDetectedMedia();
       notifyListeners();
+      _saveSessionTabs();
       return;
     }
 
     _tabs.removeAt(index);
     if (_activeTabIndex >= _tabs.length) {
       _activeTabIndex = _tabs.length - 1;
+      _clearDetectedMedia();
+      _setCurrentUrlInternal(_tabs[_activeTabIndex].url, save: false);
+    } else if (index == _activeTabIndex) {
+      // closed current tab, need to reset state
+      _clearDetectedMedia();
+      _setCurrentUrlInternal(_tabs[_activeTabIndex].url, save: false);
     } else if (index < _activeTabIndex) {
       _activeTabIndex--;
     }
-
+    
     _clearDetectedMedia();
     _fetchError = null;
     notifyListeners();
+    _saveSessionTabs();
   }
   // --------------------------
 
@@ -330,9 +449,86 @@ class BrowserProvider extends ChangeNotifier {
     _resourceNotifyTimer = Timer(_resourceNotifyInterval, () {
       if (_resourceNotifyPending) {
         _resourceNotifyPending = false;
+        if (_lastNotifiedMediaStateVersion == _mediaStateVersion) {
+          return;
+        }
+        _lastNotifiedMediaStateVersion = _mediaStateVersion;
         notifyListeners();
       }
     });
+  }
+
+  void _removeStreamCacheEntry(String videoId) {
+    _streamCache.remove(videoId);
+    _streamCacheLastAccess.remove(videoId);
+    _streamCacheWrittenAt.remove(videoId);
+  }
+
+  void _pruneStreamCache() {
+    if (_streamCache.isEmpty) {
+      return;
+    }
+
+    final now = DateTime.now();
+    final expiredKeys = <String>[];
+
+    for (final entry in _streamCacheWrittenAt.entries) {
+      if (now.difference(entry.value) > _streamCacheTtl) {
+        expiredKeys.add(entry.key);
+      }
+    }
+
+    for (final key in expiredKeys) {
+      _removeStreamCacheEntry(key);
+    }
+
+    while (_streamCache.length > _maxCacheSize) {
+      String? oldestKey;
+      DateTime? oldestAccess;
+
+      for (final key in _streamCache.keys) {
+        final candidate = _streamCacheLastAccess[key] ??
+            _streamCacheWrittenAt[key] ??
+            DateTime.fromMillisecondsSinceEpoch(0);
+
+        if (oldestAccess == null || candidate.isBefore(oldestAccess)) {
+          oldestAccess = candidate;
+          oldestKey = key;
+        }
+      }
+
+      if (oldestKey == null) {
+        break;
+      }
+
+      _removeStreamCacheEntry(oldestKey);
+    }
+  }
+
+  List<DetectedMedia>? _readStreamCache(String videoId) {
+    _pruneStreamCache();
+
+    final cached = _streamCache[videoId];
+    if (cached == null) {
+      return null;
+    }
+
+    final writtenAt = _streamCacheWrittenAt[videoId];
+    if (writtenAt != null && DateTime.now().difference(writtenAt) > _streamCacheTtl) {
+      _removeStreamCacheEntry(videoId);
+      return null;
+    }
+
+    _streamCacheLastAccess[videoId] = DateTime.now();
+    return cached;
+  }
+
+  void _writeStreamCache(String videoId, List<DetectedMedia> streams) {
+    final now = DateTime.now();
+    _streamCache[videoId] = List<DetectedMedia>.from(streams);
+    _streamCacheWrittenAt[videoId] = now;
+    _streamCacheLastAccess[videoId] = now;
+    _pruneStreamCache();
   }
 
   bool _shouldInspectResource(
@@ -484,7 +680,14 @@ class BrowserProvider extends ChangeNotifier {
     }
 
     final host = uri.host.toLowerCase();
-
+    
+    // Default to the current tab's URL to act as the referer for CDN requests
+    String currentTabUrl = '';
+    if (_tabs.isNotEmpty && _activeTabIndex < _tabs.length) {
+      currentTabUrl = _tabs[_activeTabIndex].url;
+    }
+    final tabUri = Uri.tryParse(currentTabUrl);
+    
     String refererBase;
     if (host.contains('instagram.com') || host.contains('cdninstagram.com')) {
       refererBase = 'https://www.instagram.com/';
@@ -499,6 +702,8 @@ class BrowserProvider extends ChangeNotifier {
       refererBase = 'https://x.com/';
     } else if (host.contains('tiktok.com') || host.contains('tiktokcdn')) {
       refererBase = 'https://www.tiktok.com/';
+    } else if (tabUri != null && tabUri.host.isNotEmpty) {
+      refererBase = '${tabUri.scheme}://${tabUri.host}/';
     } else {
       refererBase = '${uri.scheme}://${uri.host}/';
     }
@@ -893,10 +1098,6 @@ class BrowserProvider extends ChangeNotifier {
     String? contentType,
     int? contentLength,
   }) {
-    if (!_isSocialVideoPage && !_isFetchingGeneric) {
-      return;
-    }
-
     if (_detectedMedia.length >= _maxDetectedMediaItems && !_isFetchingGeneric) {
       return;
     }
@@ -971,9 +1172,10 @@ class BrowserProvider extends ChangeNotifier {
     if (_isFetchingYouTube) return;
 
     // Double-check cache
-    if (_streamCache.containsKey(videoId)) {
+    final cachedStreams = _readStreamCache(videoId);
+    if (cachedStreams != null) {
       if (_currentYouTubeVideoId == videoId && _detectedMedia.isEmpty) {
-        _appendDetectedMedia(_streamCache[videoId]!);
+        _appendDetectedMedia(cachedStreams);
         notifyListeners();
       }
       return;
@@ -989,12 +1191,7 @@ class BrowserProvider extends ChangeNotifier {
       );
 
       // Cache immediately
-      _streamCache[videoId] = List.from(streams);
-
-      // Limit cache size
-      while (_streamCache.length > _maxCacheSize) {
-        _streamCache.remove(_streamCache.keys.first);
-      }
+      _writeStreamCache(videoId, streams);
 
       // Update UI if still on same video
       if (_currentYouTubeVideoId == videoId) {
@@ -1036,13 +1233,14 @@ class BrowserProvider extends ChangeNotifier {
     // Force refresh - clear cache first
     if (forceRefresh) {
       _youtubeService.clearCache();
-      _streamCache.remove(videoId);
+      _removeStreamCacheEntry(videoId);
     }
 
     // Use cache if available (and not force refreshing)
-    if (!forceRefresh && _streamCache.containsKey(videoId)) {
+    final cachedStreams = forceRefresh ? null : _readStreamCache(videoId);
+    if (cachedStreams != null) {
       if (_detectedMedia.isEmpty) {
-        _appendDetectedMedia(_streamCache[videoId]!);
+        _appendDetectedMedia(cachedStreams);
         notifyListeners();
       }
       return;
@@ -1083,26 +1281,39 @@ class BrowserProvider extends ChangeNotifier {
       var foundAny = false;
 
       final candidates = _buildExtractionCandidates(_tabs[_activeTabIndex].url);
+      const int maxRetries = 2; // Up to 3 total attempts per candidate
       for (var i = 0; i < candidates.length; i++) {
         final candidate = candidates[i];
+        bool candidateSuccess = false;
 
-        try {
-          final extracted = await _webviewExtractor
-              .extractMedia(candidate)
-              .timeout(const Duration(seconds: 12));
+        for (int attempt = 0; attempt <= maxRetries; attempt++) {
+          try {
+            final extracted = await _webviewExtractor
+                .extractMedia(candidate, titleHint: pageTitle)
+                .timeout(const Duration(seconds: 12));
 
-          for (final media in extracted) {
-            final changed = _upsertDetectedMedia(media);
-            if (changed) {
-              foundAny = true;
+            for (final media in extracted) {
+              final changed = _upsertDetectedMedia(media);
+              if (changed) {
+                foundAny = true;
+              }
+            }
+
+            if (_detectedMedia.isNotEmpty) {
+              candidateSuccess = true;
+              break; // Break retry loop on success
+            }
+          } catch (e) {
+            debugPrint('Headless extraction attempt ${attempt + 1} failed for candidate $candidate: $e');
+            if (attempt < maxRetries) {
+              // Exponential backoff before retrying
+              await Future.delayed(Duration(seconds: 2 << attempt));
             }
           }
-
-          if (_detectedMedia.isNotEmpty) {
-            break;
-          }
-        } catch (e) {
-          debugPrint('Headless extraction failed for a candidate URL: $e');
+        }
+        
+        if (candidateSuccess) {
+          break; // Stop trying other candidates if one works
         }
       }
 
@@ -1159,11 +1370,118 @@ class BrowserProvider extends ChangeNotifier {
     // Calling it again would trigger duplicate stream fetching
   }
 
+  // ── Bookmark Management ──
+
+  Future<void> _loadBookmarks() async {
+    try {
+      _cachedPrefs ??= await SharedPreferences.getInstance();
+      final json = _cachedPrefs!.getString(_bookmarksPrefsKey);
+      if (json != null && json.isNotEmpty) {
+        final List<dynamic> decoded = jsonDecode(json);
+        for (final item in decoded) {
+          _bookmarks.add(Bookmark.fromMap(item as Map<String, dynamic>));
+        }
+        notifyListeners();
+      }
+    } catch (e) {
+      debugPrint('Failed to load bookmarks: $e');
+    }
+  }
+
+  void _saveBookmarks() {
+    _bookmarkSaveDebounce?.cancel();
+    _bookmarkSaveDebounce = Timer(const Duration(milliseconds: 300), () {
+      unawaited(_saveBookmarksImmediate());
+    });
+  }
+
+  Future<void> _saveBookmarksImmediate() async {
+    if (_bookmarkSaveInFlight) return;
+    _bookmarkSaveInFlight = true;
+    try {
+      _cachedPrefs ??= await SharedPreferences.getInstance();
+      final data = _bookmarks.map((b) => b.toMap()).toList();
+      await _cachedPrefs!.setString(_bookmarksPrefsKey, jsonEncode(data));
+    } catch (e) {
+      debugPrint('Failed to save bookmarks: $e');
+    } finally {
+      _bookmarkSaveInFlight = false;
+    }
+  }
+
+  bool isBookmarked(String url) {
+    return _bookmarks.any((b) => b.url == url);
+  }
+
+  void addBookmark(String url, String title, {String? faviconUrl}) {
+    if (isBookmarked(url)) return;
+    _bookmarks.insert(
+      0,
+      Bookmark(url: url, title: title, faviconUrl: faviconUrl),
+    );
+    _saveBookmarks();
+    notifyListeners();
+  }
+
+  void removeBookmark(String url) {
+    _bookmarks.removeWhere((b) => b.url == url);
+    _saveBookmarks();
+    notifyListeners();
+  }
+
+  void removeBookmarkById(String id) {
+    _bookmarks.removeWhere((b) => b.id == id);
+    _saveBookmarks();
+    notifyListeners();
+  }
+
+  void toggleBookmark(String url, String title, {String? faviconUrl}) {
+    if (isBookmarked(url)) {
+      removeBookmark(url);
+    } else {
+      addBookmark(url, title, faviconUrl: faviconUrl);
+    }
+  }
+
+  // ── Privacy Tracking ──
+
+  Future<void> _loadPrivacySettings() async {
+    try {
+      _cachedPrefs ??= await SharedPreferences.getInstance();
+      _autoClearOnExit = _cachedPrefs!.getBool(_autoClearOnExitPrefsKey) ?? false;
+    } catch (_) {}
+  }
+
+  void incrementTrackersBlocked() {
+    _trackersBlockedCount++;
+    // Don't notify for every tracker — batch updates happen via resource loading
+  }
+
+  void resetTrackersBlocked() {
+    _trackersBlockedCount = 0;
+    notifyListeners();
+  }
+
+  Future<void> setAutoClearOnExit(bool value) async {
+    if (_autoClearOnExit == value) return;
+    _autoClearOnExit = value;
+    try {
+      _cachedPrefs ??= await SharedPreferences.getInstance();
+      await _cachedPrefs!.setBool(_autoClearOnExitPrefsKey, value);
+    } catch (_) {}
+    notifyListeners();
+  }
+
   @override
   void dispose() {
     _fetchDebounceTimer?.cancel();
     _genericFetchDebounceTimer?.cancel();
     _resourceNotifyTimer?.cancel();
+    _tabSaveDebounce?.cancel();
+    _bookmarkSaveDebounce?.cancel();
+    // Flush any pending saves immediately before dispose
+    unawaited(_saveSessionTabsImmediate());
+    unawaited(_saveBookmarksImmediate());
     _sizeProbeQueue.clear();
     _sizeProbeInFlight.clear();
     _sizeProbeActiveCount = 0;

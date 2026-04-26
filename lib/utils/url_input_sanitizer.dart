@@ -35,7 +35,7 @@ class UrlInputSanitizer {
 
   static String _searchUrl(String query) {
     final sanitized = _normalizeInput(query);
-    return 'https://www.google.com/search?q=${Uri.encodeComponent(sanitized)}';
+    return 'https://duckduckgo.com/?q=${Uri.encodeComponent(sanitized)}';
   }
 
   static String _normalizeInput(String value) {

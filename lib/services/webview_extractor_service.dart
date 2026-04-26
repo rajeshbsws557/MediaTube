@@ -14,13 +14,15 @@ class WebViewExtractorService {
   final Map<String, Future<List<DetectedMedia>>> _inFlight =
       <String, Future<List<DetectedMedia>>>{};
 
-  static const Duration _overallTimeout = Duration(seconds: 8);
+  static const Duration _overallTimeout = Duration(seconds: 15);
   static const Duration _cacheTtl = Duration(minutes: 3);
   static const List<Duration> _domScanDelays = [
     Duration(milliseconds: 120),
     Duration(milliseconds: 220),
     Duration(milliseconds: 350),
     Duration(milliseconds: 560),
+    Duration(milliseconds: 800),
+    Duration(milliseconds: 1200),
   ];
 
   void _addMediaIfNew(List<DetectedMedia> mediaList, DetectedMedia media) {
@@ -47,11 +49,13 @@ class WebViewExtractorService {
             }
           }
 
-          var videos = document.querySelectorAll('video, source');
-          var metas = document.querySelectorAll('meta[property="og:video"], meta[property="og:video:url"], meta[property="twitter:player:stream"]');
+          var videos = document.querySelectorAll('video, source, audio');
+          var metas = document.querySelectorAll('meta[property="og:video"], meta[property="og:video:url"], meta[property="og:video:secure_url"], meta[property="twitter:player:stream"]');
           var urls = [];
+
           for(var i=0; i<videos.length; i++) {
             if(videos[i].src) urls.push(toAbsolute(videos[i].src));
+            if(videos[i].currentSrc) urls.push(toAbsolute(videos[i].currentSrc));
           }
 
           for (var m=0; m<metas.length; m++) {
@@ -59,10 +63,35 @@ class WebViewExtractorService {
             if (metaUrl) urls.push(toAbsolute(metaUrl));
           }
 
-          var anchors = document.querySelectorAll('a[href*=".mp4"], a[href*=".m3u8"], a[href*="video"]');
+          var anchors = document.querySelectorAll('a[href*=".mp4"], a[href*=".m3u8"], a[href*=".webm"], a[href*="video"]');
           for (var a=0; a<anchors.length; a++) {
             var href = anchors[a].getAttribute('href');
             if (href) urls.push(toAbsolute(href));
+          }
+
+          // Scan performance entries for media resources loaded via XHR/fetch
+          try {
+            var entries = performance.getEntriesByType('resource');
+            for (var e=0; e<entries.length; e++) {
+              var name = entries[e].name;
+              if (!name) continue;
+              var lower = name.toLowerCase();
+              if (lower.indexOf('.mp4') !== -1 || lower.indexOf('.m3u8') !== -1 ||
+                  lower.indexOf('.webm') !== -1 || lower.indexOf('.m4a') !== -1 ||
+                  lower.indexOf('video') !== -1 || lower.indexOf('mime=video') !== -1 ||
+                  lower.indexOf('fbcdn.net') !== -1 || lower.indexOf('cdninstagram.com') !== -1 ||
+                  lower.indexOf('tiktokcdn') !== -1 || lower.indexOf('twimg.com') !== -1 ||
+                  lower.indexOf('googlevideo.com') !== -1) {
+                urls.push(name);
+              }
+            }
+          } catch(pe) {}
+
+          // Check for media URLs stashed by injected scripts
+          if (window.__mediaUrls && Array.isArray(window.__mediaUrls)) {
+            for (var u=0; u<window.__mediaUrls.length; u++) {
+              urls.push(window.__mediaUrls[u]);
+            }
           }
 
           return Array.from(new Set(urls.filter(Boolean)));
@@ -106,7 +135,7 @@ class WebViewExtractorService {
   }
 
   /// Extract media from a generic URL using a hidden browser
-  Future<List<DetectedMedia>> extractMedia(String url) async {
+  Future<List<DetectedMedia>> extractMedia(String url, {String? titleHint}) async {
     final key = _normalizeKey(url);
 
     final cached = _getCached(key);
@@ -119,7 +148,7 @@ class WebViewExtractorService {
       return existingInFlight;
     }
 
-    final extractionFuture = _extractMediaInternal(url, cacheKey: key);
+    final extractionFuture = _extractMediaInternal(url, cacheKey: key, titleHint: titleHint);
     _inFlight[key] = extractionFuture;
 
     try {
@@ -132,6 +161,7 @@ class WebViewExtractorService {
   Future<List<DetectedMedia>> _extractMediaInternal(
     String url, {
     required String cacheKey,
+    String? titleHint,
   }) async {
     final completer = Completer<List<DetectedMedia>>();
     final List<DetectedMedia> mediaList = [];
@@ -169,7 +199,7 @@ class WebViewExtractorService {
         mediaPlaybackRequiresUserGesture: false,
       ),
       onLoadStop: (controller, url) async {
-        final title = await controller.getTitle() ?? 'Extracted Video';
+        final title = await controller.getTitle() ?? titleHint ?? 'Extracted Video';
 
         try {
           for (final delay in _domScanDelays) {
@@ -188,7 +218,7 @@ class WebViewExtractorService {
         final reqUrl = request.url.toString();
         final detected = _sniffer.detectMedia(
           reqUrl,
-          pageTitle: 'Intercepted Video',
+          pageTitle: titleHint ?? 'Intercepted Video',
         );
         if (detected != null) {
           _addMediaIfNew(mediaList, detected);

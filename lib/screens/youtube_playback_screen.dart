@@ -153,12 +153,6 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
 
       await _refreshPipAutoEnterForCurrentState(lifecycleController);
 
-      if (_allowBackgroundContinuation &&
-          !_isAudioOnly &&
-          lifecycleController.value.isPlaying) {
-        unawaited(_nativePlaybackBridge.enterPipNow());
-      }
-
       await _syncPlaybackRuntimeState(
         isPlaying: lifecycleController.value.isPlaying,
         force: true,
@@ -178,10 +172,6 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
           isPlaying: lifecycleController.value.isPlaying,
           force: true,
         );
-
-        if (!_isAudioOnly && lifecycleController.value.isPlaying) {
-          unawaited(_nativePlaybackBridge.enterPipNow());
-        }
       }
     } catch (e) {
       debugPrint('Background lifecycle handoff failed: $e');
@@ -305,25 +295,6 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
       if (controller == null ||
           !controller.value.isInitialized ||
           !controller.value.isPlaying) {
-        _scheduleAutoBackgroundRetry();
-        return;
-      }
-
-      var pipReady = true;
-      if (!_isAudioOnly) {
-        try {
-          pipReady = await _nativePlaybackBridge.enterPipNow();
-        } catch (e) {
-          pipReady = false;
-          debugPrint('Auto PiP entry failed: $e');
-        }
-
-        if (pipReady) {
-          await Future.delayed(const Duration(milliseconds: 220));
-        }
-      }
-
-      if (!pipReady) {
         _scheduleAutoBackgroundRetry();
         return;
       }
@@ -453,10 +424,10 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     _lastConfiguredPipAspectHeight = normalizedHeight;
 
     await _nativePlaybackBridge.configurePip(
-      enabled: enabled,
+      enabled: false, // Explicitly disabled: User requested seamless background audio without a floating window
       aspectWidth: normalizedWidth,
       aspectHeight: normalizedHeight,
-      autoEnter: autoEnter,
+      autoEnter: false, // Ensure no auto floating window
     );
   }
 
@@ -704,16 +675,7 @@ class _YoutubePlaybackScreenState extends State<YoutubePlaybackScreen>
     return Scaffold(
       appBar: AppBar(
         title: const Text('YouTube Playback'),
-        actions: [
-          if (!_isAudioOnly && controller != null && controller.value.isInitialized)
-            IconButton(
-              tooltip: 'Picture in Picture',
-              icon: const Icon(Icons.picture_in_picture_alt),
-              onPressed: () {
-                unawaited(_nativePlaybackBridge.enterPipNow());
-              },
-            ),
-        ],
+        actions: [],
       ),
       body: SafeArea(
         top: false,

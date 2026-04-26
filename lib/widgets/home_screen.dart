@@ -27,7 +27,7 @@ class QuickAccessSite {
       'url': url,
       // Just save a string identifier or default to 'custom'
       'iconName': 'custom',
-      'color': color.value,
+      'color': color.toARGB32(),
     };
   }
 
@@ -266,7 +266,7 @@ class _HomeScreenState extends State<HomeScreen> {
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: isDark
-              ? [const Color(0xFF1A1A2E), const Color(0xFF16213E)]
+              ? [const Color(0xFF0E0E18), const Color(0xFF121220)]
               : [const Color(0xFFF5F7FA), const Color(0xFFE4E8EE)],
         ),
       ),
@@ -341,24 +341,26 @@ class _HomeScreenState extends State<HomeScreen> {
     return Row(
       children: [
         Container(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
             gradient: const LinearGradient(
-              colors: [Color(0xFF667EEA), Color(0xFF764BA2)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xFFFF3A3A), Color(0xFFE50914)],
             ),
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.circular(18),
             boxShadow: [
               BoxShadow(
-                color: const Color(0xFF667EEA).withAlpha(100),
+                color: const Color(0xFFE50914).withAlpha(80),
                 blurRadius: 20,
-                offset: const Offset(0, 8),
+                offset: const Offset(0, 6),
               ),
             ],
           ),
           child: const Icon(
             Icons.download_rounded,
             color: Colors.white,
-            size: 32,
+            size: 30,
           ),
         ),
         const SizedBox(width: 16),
@@ -368,16 +370,20 @@ class _HomeScreenState extends State<HomeScreen> {
             Text(
               'MediaTube',
               style: TextStyle(
-                fontSize: 28,
-                fontWeight: FontWeight.bold,
+                fontSize: 26,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.3,
                 color: isDark ? Colors.white : Colors.black87,
               ),
             ),
+            const SizedBox(height: 2),
             Text(
               'Download videos from anywhere',
               style: TextStyle(
-                fontSize: 14,
-                color: isDark ? Colors.white60 : Colors.black54,
+                fontSize: 13,
+                fontWeight: FontWeight.w500,
+                color: isDark ? Colors.white54 : Colors.black45,
+                letterSpacing: 0.2,
               ),
             ),
           ],
@@ -538,13 +544,24 @@ class _HomeScreenState extends State<HomeScreen> {
         borderRadius: BorderRadius.circular(16),
         child: Container(
           decoration: BoxDecoration(
-            color: isDark ? Colors.white.withAlpha(20) : Colors.white,
+            color: isDark ? Colors.white.withAlpha(12) : Colors.white,
             borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: isDark
+                  ? Colors.white.withAlpha(15)
+                  : Colors.black.withAlpha(8),
+            ),
             boxShadow: isDark
-                ? null
+                ? [
+                    BoxShadow(
+                      color: site.color.withAlpha(12),
+                      blurRadius: 12,
+                      offset: const Offset(0, 2),
+                    ),
+                  ]
                 : [
                     BoxShadow(
-                      color: Colors.black.withAlpha(15),
+                      color: Colors.black.withAlpha(12),
                       blurRadius: 10,
                       offset: const Offset(0, 2),
                     ),

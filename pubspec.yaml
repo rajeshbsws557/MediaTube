@@ -1,0 +1,84 @@
+# Developer - Rajesh Biswas
+# Website - https://rajeshbiswas.dev
+# GitHub - https://github.com/rajeshbsws557
+# Version - 1.0.2
+# License - MIT
+
+name: media_tube
+description: "A media browser with video/audio detection and downloading capabilities"
+publish_to: 'none'
+version: 1.0.5+5
+
+environment:
+  sdk: ^3.10.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  
+  # Browser
+  flutter_inappwebview: ^6.1.5
+  
+  # YouTube extraction
+  youtube_explode_dart: ^3.0.5
+  
+  # Downloads
+  dio: ^5.7.0
+  
+  # Permissions
+  permission_handler: ^11.3.1
+  
+  # File paths
+  path_provider: ^2.1.5
+  path: ^1.9.1
+  
+  # State management
+  provider: ^6.1.2
+  
+  # UUID for unique IDs
+  uuid: ^4.5.1
+  
+  # Local notifications for download progress
+  flutter_local_notifications: ^18.0.1
+  
+  # Foreground service for downloads in background
+  flutter_foreground_task: ^8.0.0
+  
+  # Shared preferences for cookies
+  shared_preferences: ^2.3.3
+  # HTTP package for raw requests
+  http: ^1.2.0
+  
+  # Open files with system apps
+  open_filex: ^4.5.0
+  
+  # App update mechanism
+  package_info_plus: ^8.0.0
+  receive_sharing_intent: ^1.8.1
+  share_plus: ^12.0.1
+  dynamic_color: ^1.8.1
+  video_player: ^2.10.0
+  audio_session: ^0.2.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.1
+
+flutter_launcher_icons:
+  android: true
+  ios: false
+  image_path: "assets/icon.png"
+  min_sdk_size: 24
+  web:
+    generate: true
+    image_path: "assets/icon.png"
+    background_color: "#FFFFFF"
+    theme_color: "#E50914"
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icon.png

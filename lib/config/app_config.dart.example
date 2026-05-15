@@ -1,0 +1,34 @@
+/// App Configuration — TEMPLATE
+///
+/// Copy this file to `app_config.dart` and fill in your actual values.
+/// The real `app_config.dart` is gitignored and will NOT be committed.
+
+class AppConfig {
+  /// Backend server URL (OPTIONAL - used as fallback only)
+  /// Native on-device extraction is now the default!
+  static const String backendBaseUrl = 'http://YOUR_SERVER_IP:5000';
+
+  /// GitHub repository owner
+  static const String githubRepoOwner = 'YOUR_GITHUB_USERNAME';
+
+  /// GitHub repository name
+  static const String githubRepoName = 'YOUR_REPO_NAME';
+
+  /// GitHub releases URL (derived)
+  static const String githubReleasesUrl =
+      'https://github.com/$githubRepoOwner/$githubRepoName/releases';
+
+  /// Current app version (should match pubspec.yaml)
+  static const String appVersion = '1.0.0';
+
+  // ============================================================
+  // SECURITY CONFIGURATION
+  // ============================================================
+
+  /// Expected package name for anti-clone check
+  static const String expectedPackageName = 'com.your.packagename';
+
+  /// Expected signing certificate SHA-256 hash
+  /// Run the app once to see the actual hash in logs, then update this value.
+  static const String expectedSignatureHash = 'YOUR_SIGNATURE_HASH_HERE';
+}

@@ -1,0 +1,857 @@
+import 'dart:io';
+import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
+import 'package:uuid/uuid.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import '../models/models.dart';
+import 'backend_download_service.dart';
+import 'dart:async';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
+
+/// Service to manage file downloads with pause/resume support
+class DownloadService {
+  final Dio _dio;
+
+  final BackendDownloadService _backendService;
+  final Map<String, CancelToken> _cancelTokens = {};
+  final Map<String, BackendCancelToken> _backendCancelTokens = {};
+  final Map<String, bool> _pausedDownloads = {}; // Track paused state
+  final Map<String, DetectedMedia> _downloadMedia =
+      {}; // Store media for resume
+  String? _cachedUserAgent;
+
+  static const String _fallbackUserAgent =
+      'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
+
+  // Backend server settings
+  bool? _backendAvailable; // Cache backend availability
+
+  // Download directory
+  String? _downloadPath;
+
+  DownloadService({
+    Dio? dio,
+    BackendDownloadService? backendService,
+  }) : _dio = dio ?? Dio(),
+       _backendService = backendService ?? BackendDownloadService();
+
+  // Headers required for YouTube downloads
+  static const Map<String, String> defaultHeaders = {
+    // Fallback headers (used when runtime WebView User-Agent cannot be fetched)
+    'User-Agent': _fallbackUserAgent,
+    'Accept': '*/*',
+    'Connection': 'keep-alive',
+    // UPDATED: Use Mobile domain to match User-Agent
+    'Referer': 'https://m.youtube.com/',
+    'Origin': 'https://m.youtube.com',
+  };
+
+  Future<String> _getRuntimeUserAgent() async {
+    final cached = _cachedUserAgent;
+    if (cached != null && cached.isNotEmpty) {
+      return cached;
+    }
+
+    try {
+      final resolved = (await InAppWebViewController.getDefaultUserAgent()).trim();
+      if (resolved.isNotEmpty) {
+        _cachedUserAgent = resolved;
+        return resolved;
+      }
+    } catch (e) {
+      debugPrint('⚠️ Failed to resolve WebView User-Agent: $e');
+    }
+
+    _cachedUserAgent = _fallbackUserAgent;
+    return _fallbackUserAgent;
+  }
+
+  Future<Map<String, dynamic>> _buildBaseHeaders(String refererBase) async {
+    final refererUri = Uri.parse(refererBase);
+    final userAgent = await _getRuntimeUserAgent();
+
+    return <String, dynamic>{
+      'User-Agent': userAgent,
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Connection': 'keep-alive',
+      'Referer': refererBase,
+      'Origin': '${refererUri.scheme}://${refererUri.host}',
+    };
+  }
+
+  Future<String> get downloadPath async {
+    if (_downloadPath != null) return _downloadPath!;
+
+    // Try to get the Downloads folder, fall back to app documents
+    try {
+      if (Platform.isAndroid) {
+        // Android external storage Downloads folder
+        final dir = Directory('/storage/emulated/0/Download/MediaTube');
+        if (!await dir.exists()) {
+          await dir.create(recursive: true);
+        }
+        // Verify the directory is writable by creating a test file
+        final testFile = File('${dir.path}/.write_test');
+        await testFile.writeAsString('test');
+        await testFile.delete();
+        _downloadPath = dir.path;
+      } else {
+        final dir = await getApplicationDocumentsDirectory();
+        final downloadDir = Directory(p.join(dir.path, 'MediaTube'));
+        if (!await downloadDir.exists()) {
+          await downloadDir.create(recursive: true);
+        }
+        _downloadPath = downloadDir.path;
+      }
+    } catch (e) {
+      debugPrint('⚠️ Failed to use external storage: $e');
+      // Fallback to app-private documents directory (always writable)
+      final dir = await getApplicationDocumentsDirectory();
+      final downloadDir = Directory(p.join(dir.path, 'MediaTube'));
+      if (!await downloadDir.exists()) {
+        await downloadDir.create(recursive: true);
+      }
+      _downloadPath = downloadDir.path;
+      debugPrint('📁 Using fallback download path: $_downloadPath');
+    }
+
+    return _downloadPath!;
+  }
+
+  /// Ensure download directory exists (call before any download)
+  Future<void> ensureDownloadDirectory() async {
+    final path = await downloadPath;
+    final dir = Directory(path);
+    try {
+      if (!await dir.exists()) {
+        await dir.create(recursive: true);
+      }
+    } catch (e) {
+      debugPrint('⚠️ Failed to create download dir: $e');
+      // Reset cached path so downloadPath getter retries with fallback
+      _downloadPath = null;
+      await downloadPath; // This will use fallback
+    }
+  }
+
+  /// Create a download task without starting the download
+  Future<DownloadTask> createDownloadTask(DetectedMedia media) async {
+    await ensureDownloadDirectory(); // Ensure folder exists
+    final taskId = const Uuid().v4();
+    final basePath = await downloadPath;
+    final sanitizedTitle = _sanitizeFileName(media.title);
+    final fileName = '$sanitizedTitle.${media.extension}';
+    final savePath = p.join(basePath, fileName);
+
+    return DownloadTask(
+      id: taskId,
+      url: media.url,
+      fileName: fileName,
+      savePath: savePath,
+      audioUrl: media.audioUrl,
+      requiresMerge:
+          media.isDash && media.audioUrl != null && !media.useBackend,
+      isAudioOnly: media.type == MediaType.audio,
+      status: DownloadStatus.pending,
+    );
+  }
+
+  /// Check if backend server is available
+  Future<bool> isBackendAvailable() async {
+    _backendAvailable ??= await _backendService.isServerAvailable();
+    return _backendAvailable!;
+  }
+
+  /// Set backend server URL
+  void setBackendServerUrl(String url) {
+    BackendDownloadService.setServerUrl(url);
+    _backendAvailable = null; // Reset cache
+  }
+
+  /// Get current backend server URL
+  String get backendServerUrl => BackendDownloadService.serverUrl;
+
+  /// Get backend download service (for UI access)
+  BackendDownloadService get backendService => _backendService;
+
+  /// Update the foreground notification text
+  void _updateNotification(String title, String text, double progress) {
+    FlutterForegroundTask.updateService(
+      notificationTitle: title,
+      notificationText: text,
+    );
+  }
+
+  /// Start downloading a media file (call after createDownloadTask)
+  /// ALWAYS uses backend for YouTube - NO FALLBACKS
+  Future<void> startDownload(
+    DownloadTask task,
+    DetectedMedia media, {
+    Function(DownloadTask)? onProgress,
+    Function(DownloadTask)? onComplete,
+    Function(DownloadTask)? onError,
+  }) async {
+    if (!_isSafeNetworkUrl(task.url)) {
+      task.status = DownloadStatus.failed;
+      task.error = 'Blocked unsafe URL scheme';
+      onError?.call(task);
+      return;
+    }
+
+    final cancelToken = CancelToken();
+    _cancelTokens[task.id] = cancelToken;
+    _pausedDownloads[task.id] = false;
+    _downloadMedia[task.id] = media;
+
+    // Create backend cancel token for YouTube downloads
+    final backendCancelToken = BackendCancelToken();
+    _backendCancelTokens[task.id] = backendCancelToken;
+
+    task.status = DownloadStatus.downloading;
+    onProgress?.call(task);
+
+    // Note: Foreground service is managed by DownloadProvider via BackgroundDownloadService
+
+    debugPrint('Starting download: ${media.title}');
+    debugPrint('Source: ${media.source}, VideoId: ${media.videoId}');
+
+    try {
+      if (media.source == MediaSource.youtube) {
+        if (media.type == MediaType.audio && media.useBackend == false) {
+          final canUseDirectAudio = _looksLikeDirectMediaUrl(media.url);
+          if (canUseDirectAudio) {
+            try {
+              // Audio-only streams from youtube_explode may already contain direct CDN URLs.
+              debugPrint('🎵 Direct audio download (using existing CDN URL)');
+              await _backendService.downloadDirectFromUrl(
+                task,
+                media.url,
+                savePath: task.savePath,
+                onProgress: (t) {
+                  _updateNotification(
+                    'Downloading ${media.title}',
+                    '${(t.progress * 100).toInt()}%',
+                    t.progress,
+                  );
+                  onProgress?.call(t);
+                },
+                onComplete: (t) {
+                  _cleanup(task.id);
+                  onComplete?.call(t);
+                },
+                cancelToken: backendCancelToken,
+              );
+              return;
+            } catch (e) {
+              debugPrint(
+                '⚠️ Direct audio URL failed (possibly expired), switching to extractor flow: $e',
+              );
+            }
+          }
+
+          final backendMedia = _normalizeYouTubeMediaForBackend(media);
+          debugPrint('🌐 Using backend/native extractor for audio download');
+          await _backendService.downloadDirect(
+            task,
+            backendMedia,
+            savePath: task.savePath,
+            onProgress: (t) {
+              _updateNotification(
+                'Downloading ${media.title}',
+                '${(t.progress * 100).toInt()}%',
+                t.progress,
+              );
+              onProgress?.call(t);
+            },
+            onComplete: (t) {
+              _cleanup(task.id);
+              onComplete?.call(t);
+            },
+            onError: (t) {
+              _cleanup(task.id);
+              onError?.call(t);
+            },
+            cancelToken: backendCancelToken,
+          );
+        } else if (media.useBackend == false && media.url.isNotEmpty) {
+          // Audio-only streams: already have direct CDN URL from youtube_explode
+          // Use backend's fast parallel download engine, skip URL re-extraction
+          debugPrint('🎵 Direct audio download (skipping re-extraction)');
+          await _backendService.downloadDirectFromUrl(
+            task,
+            media.url,
+            savePath: task.savePath,
+            onProgress: (t) {
+              _updateNotification(
+                'Downloading ${media.title}',
+                '${(t.progress * 100).toInt()}%',
+                t.progress,
+              );
+              onProgress?.call(t);
+            },
+            onComplete: (t) {
+              _cleanup(task.id);
+              onComplete?.call(t);
+            },
+            onError: (t) {
+              _cleanup(task.id);
+              onError?.call(t);
+            },
+            cancelToken: backendCancelToken,
+          );
+        } else {
+          // Video streams: need backend to extract/merge DASH streams
+          debugPrint('🌐 Using backend server for YouTube download');
+          await _backendService.downloadDirect(
+            task,
+            media,
+            savePath: task.savePath,
+            onProgress: (t) {
+              _updateNotification(
+                'Downloading ${media.title}',
+                '${(t.progress * 100).toInt()}%',
+                t.progress,
+              );
+              onProgress?.call(t);
+            },
+            onComplete: (t) {
+              _cleanup(task.id);
+              onComplete?.call(t);
+            },
+            onError: (t) {
+              _cleanup(task.id);
+              onError?.call(t);
+            },
+            cancelToken: backendCancelToken,
+          );
+        }
+        return; // Backend handles completion/error callbacks
+      }
+
+      // Non-YouTube sources - direct download
+      debugPrint('Using direct download for non-YouTube source');
+      if (media.format == 'm3u8' || media.format == 'mpd') {
+        debugPrint('🌐 Using backend server for m3u8/mpd stream download');
+        await _backendService.downloadDirect(
+          task,
+          media,
+          savePath: task.savePath,
+          onProgress: (t) {
+            _updateNotification(
+              'Downloading ${media.title}',
+              '${(t.progress * 100).toInt()}%',
+              t.progress,
+            );
+            onProgress?.call(t);
+          },
+          onComplete: (t) {
+            _cleanup(task.id);
+            onComplete?.call(t);
+          },
+          onError: (t) {
+            _cleanup(task.id);
+            onError?.call(t);
+          },
+          cancelToken: backendCancelToken,
+        );
+        return;
+      }
+      
+      task = await _downloadSingleFileResumable(task, (t) {
+        _updateNotification(
+          'Downloading ${media.title}',
+          '${(t.progress * 100).toInt()}%',
+          t.progress,
+        );
+        onProgress?.call(t);
+      }, cancelToken);
+
+      // Check if paused
+      if (_pausedDownloads[task.id] == true) {
+        task.status = DownloadStatus.paused;
+        onProgress?.call(task);
+        return;
+      }
+
+      task.status = DownloadStatus.completed;
+      task.progress = 1.0;
+      task.completedAt = DateTime.now();
+      debugPrint('Download completed: ${media.title}');
+      _cleanup(task.id);
+      onComplete?.call(task);
+    } catch (e, stackTrace) {
+      debugPrint('Download error: $e');
+      debugPrint('Stack trace: $stackTrace');
+      if (_pausedDownloads[task.id] == true) {
+        task.status = DownloadStatus.paused;
+        onProgress?.call(task);
+      } else if (e is DioException && e.type == DioExceptionType.cancel) {
+        task.status = DownloadStatus.cancelled;
+        _cleanup(task.id);
+        onError?.call(task);
+      } else {
+        task.status = DownloadStatus.failed;
+        task.error = e.toString();
+        _cleanup(task.id);
+        onError?.call(task);
+      }
+    }
+  }
+
+  bool _isSafeNetworkUrl(String url) {
+    try {
+      final uri = Uri.parse(url);
+      if (!uri.hasScheme) return false;
+      final scheme = uri.scheme.toLowerCase();
+      return (scheme == 'http' || scheme == 'https') && uri.host.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  bool _looksLikeDirectMediaUrl(String url) {
+    try {
+      final uri = Uri.parse(url);
+      final host = uri.host.toLowerCase();
+      final path = uri.path.toLowerCase();
+      if (host.contains('googlevideo.com') || path.contains('videoplayback')) {
+        return true;
+      }
+      return path.endsWith('.m4a') ||
+          path.endsWith('.mp3') ||
+          path.endsWith('.webm') ||
+          path.endsWith('.aac') ||
+          path.endsWith('.ogg');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  DetectedMedia _normalizeYouTubeMediaForBackend(DetectedMedia media) {
+    final directUrl = media.url;
+    final hasWatchUrl = directUrl.contains('youtube.com/watch') ||
+        directUrl.contains('youtu.be/');
+
+    if (hasWatchUrl || media.videoId == null || media.videoId!.isEmpty) {
+      return media.copyWith(useBackend: true);
+    }
+
+    final watchUrl = 'https://www.youtube.com/watch?v=${media.videoId}';
+    return media.copyWith(url: watchUrl, useBackend: true);
+  }
+
+  void _cleanup(String taskId) {
+    _cancelTokens.remove(taskId);
+    _backendCancelTokens.remove(taskId);
+    _pausedDownloads.remove(taskId);
+    _downloadMedia.remove(taskId);
+  }
+
+  /// Pause a download
+  void pauseDownload(String taskId) {
+    _pausedDownloads[taskId] = true;
+    // Cancel the Dio cancel token (for non-YouTube downloads)
+    final cancelToken = _cancelTokens[taskId];
+    if (cancelToken != null && !cancelToken.isCancelled) {
+      cancelToken.cancel('Paused');
+    }
+    // Cancel the backend cancel token (for YouTube downloads)
+    final backendToken = _backendCancelTokens[taskId];
+    if (backendToken != null && !backendToken.isCancelled) {
+      backendToken.cancel('Paused');
+    }
+  }
+
+  /// Check if download is paused
+  bool isDownloadPaused(String taskId) => _pausedDownloads[taskId] == true;
+
+  /// Get stored media for resume
+  DetectedMedia? getStoredMedia(String taskId) => _downloadMedia[taskId];
+
+  /// Store media for a task (used when resuming)
+  void storeMedia(String taskId, DetectedMedia media) {
+    _downloadMedia[taskId] = media;
+  }
+
+  /// Clear the paused state for a task (used when resuming)
+  void clearPausedState(String taskId) {
+    _pausedDownloads.remove(taskId);
+    _backendCancelTokens.remove(taskId); // Remove old cancelled token
+  }
+
+  /// Download a media file (legacy method for compatibility)
+  Future<DownloadTask> downloadMedia(
+    DetectedMedia media, {
+    Function(DownloadTask)? onProgress,
+    Function(DownloadTask)? onComplete,
+    Function(DownloadTask)? onError,
+  }) async {
+    final task = await createDownloadTask(media);
+    await startDownload(
+      task,
+      media,
+      onProgress: onProgress,
+      onComplete: onComplete,
+      onError: onError,
+    );
+    return task;
+  }
+
+  Future<DownloadTask> _downloadSingleFileResumable(
+    DownloadTask task,
+    Function(DownloadTask)? onProgress,
+    CancelToken cancelToken,
+  ) async {
+    final requestHeaders = await _buildRequestHeaders(task.url);
+    final tempPath = '${task.savePath}.part';
+    task.tempPath = tempPath;
+
+    final tempFile = File(tempPath);
+    int downloadedBytes = 0;
+
+    // Check if partial file exists for resume
+    if (await tempFile.exists()) {
+      downloadedBytes = await tempFile.length();
+      task.downloadedBytes = downloadedBytes;
+    }
+
+    // Get total file size first
+    try {
+      final headResponse = await _dio.head(
+        task.url,
+        options: Options(headers: requestHeaders),
+      );
+      final contentLength = headResponse.headers.value('content-length');
+      if (contentLength != null) {
+        task.totalBytes = int.tryParse(contentLength) ?? 0;
+      }
+    } catch (_) {}
+
+    // Check if server supports range requests
+    final supportsRange = task.totalBytes > 0;
+
+    if (supportsRange &&
+        downloadedBytes > 0 &&
+        downloadedBytes < task.totalBytes) {
+      // Resume download - use streaming to append to existing file
+      debugPrint('Resuming download from $downloadedBytes bytes');
+      final headers = Map<String, dynamic>.from(requestHeaders);
+      headers['Range'] = 'bytes=$downloadedBytes-';
+
+      final response = await _dio.get<ResponseBody>(
+        task.url,
+        options: Options(headers: headers, responseType: ResponseType.stream),
+        cancelToken: cancelToken,
+      );
+
+      final file = File(tempPath);
+      final sink = file.openWrite(mode: FileMode.writeOnlyAppend);
+      int received = 0;
+      try {
+        await for (final chunk in response.data!.stream) {
+          if (_pausedDownloads[task.id] == true) {
+            cancelToken.cancel('Paused');
+            break;
+          }
+          sink.add(chunk);
+          received += chunk.length;
+          final totalReceived = downloadedBytes + received;
+          task.downloadedBytes = totalReceived;
+          if (task.totalBytes > 0) {
+            task.progress = totalReceived / task.totalBytes;
+            onProgress?.call(task);
+          }
+        }
+      } finally {
+        await sink.flush();
+        await sink.close();
+      }
+    } else {
+      // Fresh download
+      await _dio.download(
+        task.url,
+        tempPath,
+        cancelToken: cancelToken,
+        options: Options(headers: requestHeaders),
+        deleteOnError: false,
+        onReceiveProgress: (received, total) {
+          if (_pausedDownloads[task.id] == true) {
+            cancelToken.cancel('Paused');
+            return;
+          }
+          task.downloadedBytes = received;
+          if (total > 0) {
+            task.totalBytes = total;
+            task.progress = received / total;
+            onProgress?.call(task);
+          }
+        },
+      );
+    }
+
+    // If not paused, rename temp file to final
+    if (_pausedDownloads[task.id] != true) {
+      final finalFile = File(task.savePath);
+      if (await finalFile.exists()) {
+        await finalFile.delete();
+      }
+      await tempFile.rename(task.savePath);
+    }
+
+    return task;
+  }
+
+  Future<Map<String, dynamic>> _buildRequestHeaders(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri == null) {
+      return _buildBaseHeaders('https://m.youtube.com/');
+    }
+
+    final host = uri.host.toLowerCase();
+    final isYouTube =
+        host.contains('youtube.com') ||
+        host.contains('googlevideo.com') ||
+        host.contains('youtu.be');
+
+    if (isYouTube) {
+      return _buildBaseHeaders('https://m.youtube.com/');
+    }
+
+    String refererBase;
+    if (host.contains('instagram.com') || host.contains('cdninstagram.com')) {
+      refererBase = 'https://www.instagram.com/';
+    } else if (host.contains('facebook.com') ||
+        host.contains('fb.watch') ||
+        host.contains('fbcdn.net') ||
+        host.contains('fbsbx.com')) {
+      refererBase = 'https://www.facebook.com/';
+    } else if (host.contains('twitter.com') ||
+        host.contains('x.com') ||
+        host.contains('twimg.com')) {
+      refererBase = 'https://x.com/';
+    } else if (host.contains('tiktok.com') || host.contains('tiktokcdn')) {
+      refererBase = 'https://www.tiktok.com/';
+    } else {
+      refererBase = '${uri.scheme}://${uri.host}/';
+    }
+
+    final headers = await _buildBaseHeaders(refererBase);
+
+    try {
+      final cookieFragments = <String>[];
+
+      final resourceCookies = await CookieManager.instance().getCookies(
+        url: WebUri(url),
+      );
+      if (resourceCookies.isNotEmpty) {
+        cookieFragments.addAll(resourceCookies.map((c) => '${c.name}=${c.value}'));
+      }
+
+      final refererCookies = await CookieManager.instance().getCookies(
+        url: WebUri(refererBase),
+      );
+      if (refererCookies.isNotEmpty) {
+        cookieFragments.addAll(refererCookies.map((c) => '${c.name}=${c.value}'));
+      }
+
+      if (cookieFragments.isNotEmpty) {
+        headers['Cookie'] = cookieFragments.toSet().join('; ');
+      }
+    } catch (e) {
+      debugPrint('⚠️ Failed to attach WebView cookies for $host: $e');
+    }
+
+    return headers;
+  }
+
+  /// Cancel a download
+  void cancelDownload(String taskId) {
+    final cancelToken = _cancelTokens[taskId];
+    if (cancelToken != null && !cancelToken.isCancelled) {
+      cancelToken.cancel('Download cancelled by user');
+    }
+    final backendToken = _backendCancelTokens[taskId];
+    if (backendToken != null && !backendToken.isCancelled) {
+      backendToken.cancel('Download cancelled by user');
+    }
+  }
+
+  /// Cancel all downloads
+  void cancelAllDownloads() {
+    for (final token in _cancelTokens.values) {
+      if (!token.isCancelled) {
+        token.cancel('All downloads cancelled');
+      }
+    }
+    for (final token in _backendCancelTokens.values) {
+      if (!token.isCancelled) {
+        token.cancel('All downloads cancelled');
+      }
+    }
+    _cancelTokens.clear();
+    _backendCancelTokens.clear();
+  }
+
+  /// Get list of downloaded files
+  Future<List<File>> getDownloadedFiles() async {
+    final path = await downloadPath;
+    final dir = Directory(path);
+
+    if (!await dir.exists()) {
+      return [];
+    }
+
+    final files = await dir.list().where((entity) => entity is File).toList();
+    return files.cast<File>();
+  }
+
+  /// Delete a downloaded file
+  Future<bool> deleteFile(String filePath) async {
+    return _deleteFile(filePath);
+  }
+
+  /// Delete temporary/partial artifacts for a cancelled task.
+  Future<void> deletePartialFilesForTask(DownloadTask task) async {
+    final savePath = task.savePath;
+    if (savePath.isEmpty) {
+      return;
+    }
+
+    final directory = p.dirname(savePath);
+    final baseName = p.basenameWithoutExtension(savePath);
+
+    final candidateFiles = <String>{
+      savePath,
+      '$savePath.part',
+      p.join(directory, '${baseName}_video.mp4'),
+      p.join(directory, '${baseName}_video.webm'),
+      p.join(directory, '${baseName}_audio.m4a'),
+      p.join(directory, '${baseName}_audio.webm'),
+    };
+
+    if (task.tempPath != null && task.tempPath!.isNotEmpty) {
+      candidateFiles.add(task.tempPath!);
+    }
+
+    for (final filePath in candidateFiles) {
+      await _deleteFile(filePath);
+    }
+
+    try {
+      final pathHash = savePath.hashCode.toRadixString(16);
+      final chunkDir = Directory(p.join(directory, '.temp_chunks_$pathHash'));
+      if (await chunkDir.exists()) {
+        await chunkDir.delete(recursive: true);
+      }
+    } catch (e) {
+      debugPrint('Warning: Failed to clean cancelled download temp folder: $e');
+    }
+  }
+
+  Future<bool> _deleteFile(String path) async {
+    try {
+      final file = File(path);
+      if (await file.exists()) {
+        await file.delete();
+        return true;
+      }
+    } catch (e) {
+      debugPrint('Error deleting file: $e');
+    }
+    return false;
+  }
+
+  String _sanitizeFileName(String name) {
+    const windowsReservedNames = <String>{
+      'CON',
+      'PRN',
+      'AUX',
+      'NUL',
+      'COM1',
+      'COM2',
+      'COM3',
+      'COM4',
+      'COM5',
+      'COM6',
+      'COM7',
+      'COM8',
+      'COM9',
+      'LPT1',
+      'LPT2',
+      'LPT3',
+      'LPT4',
+      'LPT5',
+      'LPT6',
+      'LPT7',
+      'LPT8',
+      'LPT9',
+    };
+
+    // Remove invalid characters for file names on Windows/Android
+    // Including: < > : " / \ | ? * and control characters
+    var sanitized = name
+        .replaceAll(
+          RegExp(r'[<>:"/\\|?*\x00-\x1F]'),
+          '_',
+        ) // Replace invalid chars with underscore
+        .replaceAll(RegExp(r'[\s]+'), '_') // Replace whitespace with underscore
+        .replaceAll(RegExp(r'_+'), '_') // Collapse multiple underscores
+        .replaceAll(
+          RegExp(r'^_+|_+$'),
+          '',
+        ); // Trim leading/trailing underscores
+
+    // Windows blocks trailing dots/spaces and reserved device names.
+    sanitized = sanitized.replaceAll(RegExp(r'[\. ]+$'), '');
+    if (windowsReservedNames.contains(sanitized.toUpperCase())) {
+      sanitized = '${sanitized}_file';
+    }
+
+    // Truncate to max 100 characters
+    if (sanitized.length > 100) {
+      sanitized = sanitized.substring(0, 100);
+    }
+    // If empty, use a default name
+    if (sanitized.isEmpty) {
+      sanitized = 'download_${DateTime.now().millisecondsSinceEpoch}';
+    }
+    return sanitized;
+  }
+
+  void dispose() {
+    cancelAllDownloads();
+    _dio.close();
+  }
+}
+
+// Top-level callback for foreground task
+@pragma('vm:entry-point')
+void startCallback() {
+  FlutterForegroundTask.setTaskHandler(NotificationHandler());
+}
+
+class NotificationHandler extends TaskHandler {
+  @override
+  Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
+    // foreground task initialized
+  }
+
+  @override
+  void onRepeatEvent(DateTime timestamp) {
+    // not needed for simple notification
+  }
+
+  @override
+  Future<void> onDestroy(DateTime timestamp) async {
+    // foreground task destroyed
+  }
+
+  @override
+  void onNotificationPressed() {
+    // Launch app main screen
+    FlutterForegroundTask.launchApp();
+  }
+}

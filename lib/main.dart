@@ -67,17 +67,6 @@ void main() async {
   // Enable Impeller on Android for better rendering (if available)
   // Reduce jank by pre-warming image cache
 
-  // ============================================================
-  // FUTURE: Initialize Mobile Ads SDK here
-  // Example for Google AdMob:
-  // await MobileAds.instance.initialize();
-  //
-  // This should be done BEFORE the update check to ensure ads
-  // infrastructure is ready, but it should NOT block the app launch.
-  // Consider using a non-blocking initialization pattern:
-  // MobileAds.instance.initialize(); // Without await
-  // ============================================================
-
   // Initialize port for foreground task communication
   FlutterForegroundTask.initCommunicationPort();
 
@@ -254,25 +243,13 @@ class MediaTubeBootstrap extends StatefulWidget {
 }
 
 class _MediaTubeBootstrapState extends State<MediaTubeBootstrap> {
-  static const Duration _splashDuration = Duration(milliseconds: 1200);
-  Timer? _splashTimer;
   bool _showMainApp = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _splashTimer = Timer(_splashDuration, () {
-      if (!mounted) return;
-      setState(() {
-        _showMainApp = true;
-      });
+  void _onReady() {
+    if (!mounted) return;
+    setState(() {
+      _showMainApp = true;
     });
-  }
-
-  @override
-  void dispose() {
-    _splashTimer?.cancel();
-    super.dispose();
   }
 
   @override
@@ -282,11 +259,16 @@ class _MediaTubeBootstrapState extends State<MediaTubeBootstrap> {
       switchInCurve: Curves.easeOutCubic,
       switchOutCurve: Curves.easeInCubic,
       child: _showMainApp
-          ? const MediaTubeHome(key: ValueKey('home'))
-          : const MediaTubeSplashScreen(key: ValueKey('splash')),
+          ? MediaTubeHome(key: const ValueKey('home'))
+          : MediaTubeHome(
+              key: const ValueKey('splash_wrapper'),
+              isSplashWrapper: true,
+              onReady: _onReady,
+            ),
     );
   }
 }
+
 
 class MediaTubeSplashScreen extends StatefulWidget {
   const MediaTubeSplashScreen({super.key});
@@ -499,7 +481,10 @@ class _MediaTubeSplashScreenState extends State<MediaTubeSplashScreen>
 }
 
 class MediaTubeHome extends StatefulWidget {
-  const MediaTubeHome({super.key});
+  final bool isSplashWrapper;
+  final VoidCallback? onReady;
+
+  const MediaTubeHome({super.key, this.isSplashWrapper = false, this.onReady});
 
   @override
   State<MediaTubeHome> createState() => _MediaTubeHomeState();
@@ -507,7 +492,8 @@ class MediaTubeHome extends StatefulWidget {
 
 class _MediaTubeHomeState extends State<MediaTubeHome>
     with WidgetsBindingObserver {
-  bool _permissionsGranted = false;
+  bool _storagePermissionGranted = false;
+  bool _bypassedPermissionScreen = false;
   bool _updateCheckDone = false;
   DateTime _lastOpenUpdateCheckAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool _isOpenUpdateCheckRunning = false;
@@ -619,7 +605,7 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
     try {
       while (mounted && _pendingSharedUrls.isNotEmpty) {
         final nextSharedUrl = _pendingSharedUrls.removeAt(0);
-        await _handleSharedContent(nextSharedUrl);
+        unawaited(_handleSharedContent(nextSharedUrl));
       }
     } finally {
       _isProcessingSharedUrl = false;
@@ -630,6 +616,7 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
     String message, {
     bool isError = false,
     bool isTransient = false,
+    SnackBarAction? action,
   }) {
     if (!mounted) {
       return;
@@ -643,8 +630,9 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
         behavior: SnackBarBehavior.floating,
         duration: isTransient
             ? const Duration(seconds: 45)
-            : const Duration(seconds: 2),
+            : const Duration(seconds: 4),
         backgroundColor: isError ? Colors.red.shade700 : null,
+        action: action,
       ),
     );
   }
@@ -722,6 +710,21 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
     return false;
   }
 
+  void _showShareError(String url) {
+    if (!mounted) return;
+    _showShareStatus(
+      'Could not auto-extract.',
+      isError: true,
+      action: SnackBarAction(
+        label: 'Retry',
+        onPressed: () {
+          _pendingSharedUrls.add(url);
+          _drainPendingSharedUrls();
+        },
+      ),
+    );
+  }
+
   Future<void> _handleSharedContent(String content) async {
     final normalizedInput =
         ShareUrlService.normalizeSharedUrl(content) ?? content.trim();
@@ -762,7 +765,7 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
           return;
         }
 
-        _showShareStatus('Could not auto-extract. Open MediaTube to continue.');
+        _showShareError(url);
         return;
       }
 
@@ -804,7 +807,7 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
         return;
       }
 
-      _showShareStatus('Could not auto-extract. Open MediaTube to continue.');
+      _showShareError(url);
     } catch (error, stackTrace) {
       debugPrint('Share extraction failed: $error');
       debugPrint('$stackTrace');
@@ -818,7 +821,7 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
         return;
       }
 
-      _showShareStatus('Could not auto-extract. Open MediaTube to continue.');
+      _showShareError(url);
     }
   }
 
@@ -1002,12 +1005,18 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
     }
 
     setState(() {
-      _permissionsGranted = storageStatus.isGranted || fallbackStorageReady;
+      _storagePermissionGranted = storageStatus.isGranted || fallbackStorageReady;
+      if (_storagePermissionGranted) _bypassedPermissionScreen = true;
     });
+
+    // Notify wrapper that permissions are checked and app is ready
+    if (widget.isSplashWrapper) {
+      widget.onReady?.call();
+    }
 
     // Check for updates after permissions are verified
     // This runs once when the app starts
-    if (!_updateCheckDone) {
+    if (!_updateCheckDone && !widget.isSplashWrapper) {
       _updateCheckDone = true;
       // Schedule checks to run AFTER the first frame is rendered to avoid startup freeze
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1048,7 +1057,11 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
 
   @override
   Widget build(BuildContext context) {
-    if (!_permissionsGranted) {
+    if (widget.isSplashWrapper) {
+      return const MediaTubeSplashScreen();
+    }
+
+    if (!_storagePermissionGranted && !_bypassedPermissionScreen) {
       return Scaffold(
         body: SafeArea(
           child: Center(
@@ -1078,7 +1091,7 @@ class _MediaTubeHomeState extends State<MediaTubeHome>
                   TextButton(
                     onPressed: () {
                       setState(() {
-                        _permissionsGranted = true;
+                        _bypassedPermissionScreen = true;
                       });
                     },
                     child: const Text('Continue Anyway'),

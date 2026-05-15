@@ -993,6 +993,7 @@ class _ActiveDownloadsTab extends StatelessWidget {
           ...provider.pausedDownloads,
         ];
         return _buildDownloadsList(
+          context,
           downloads,
           emptyMessage: 'No active downloads',
           emptyIcon: Icons.download,
@@ -1012,6 +1013,7 @@ class _CompletedDownloadsTab extends StatelessWidget {
       shouldRebuild: (prev, next) => prev.length != next.length,
       builder: (context, downloads, _) {
         return _buildGroupedDownloadsList(
+          context,
           downloads,
           emptyMessage: 'No completed downloads',
           emptyIcon: Icons.check_circle_outline,
@@ -1044,6 +1046,7 @@ class _HistoryDownloadsTab extends StatelessWidget {
       builder: (context, ignored, child) {
         final provider = context.read<DownloadProvider>();
         return _buildGroupedDownloadsList(
+          context,
           provider.allDownloadsHistory,
           emptyMessage: 'No download history',
           emptyIcon: Icons.history,
@@ -1056,6 +1059,7 @@ class _HistoryDownloadsTab extends StatelessWidget {
 
 /// Shared single download list builder (used by Active tab)
 Widget _buildDownloadsList(
+  BuildContext context,
   List<DownloadTask> downloads, {
   required String emptyMessage,
   required IconData emptyIcon,
@@ -1078,6 +1082,7 @@ Widget _buildDownloadsList(
   }
 
   return ListView.separated(
+    padding: EdgeInsets.only(bottom: MediaQuery.of(context).padding.bottom + 16),
     itemCount: downloads.length,
     cacheExtent: 500,
     addAutomaticKeepAlives: false,
@@ -1150,6 +1155,7 @@ Widget _buildSwipeBackground({
 
 /// Shared grouped download list builder (used by Completed and History tabs)
 Widget _buildGroupedDownloadsList(
+  BuildContext context,
   List<DownloadTask> downloads, {
   required String emptyMessage,
   required IconData emptyIcon,
@@ -1244,7 +1250,7 @@ Widget _buildGroupedDownloadsList(
           }, childCount: audioTasks.length),
         ),
       ],
-      const SliverToBoxAdapter(child: SizedBox(height: 32)), // Bottom padding
+      SliverToBoxAdapter(child: SizedBox(height: 32 + MediaQuery.of(context).padding.bottom)), // Bottom padding
     ],
   );
 }

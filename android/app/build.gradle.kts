@@ -21,11 +21,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    // compilerOptions removed from here
-
-
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.rajesh.mediatube"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
@@ -101,8 +97,6 @@ android {
             )
         }
     }
-
-    // kotlinOptions removed; configured globally below
     
     // Auto-copy APKs to Flutter's expected output directory for all variants.
     // This keeps `flutter build apk` artifact discovery working when ABI splits are enabled.

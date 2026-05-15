@@ -20,7 +20,12 @@ class SettingsScreen extends StatelessWidget {
         child: Consumer<SettingsProvider>(
           builder: (context, settingsProvider, _) {
             return ListView(
-              padding: const EdgeInsets.all(16),
+              padding: EdgeInsets.only(
+                left: 16,
+                right: 16,
+                top: 16,
+                bottom: 16 + MediaQuery.of(context).padding.bottom,
+              ),
               children: [
                 _buildSectionHeader('Quick Actions', colorScheme.primary),
                 Card(

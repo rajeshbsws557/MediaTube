@@ -833,14 +833,16 @@ class BackendDownloadService {
       final outputFile = File(savePath);
       final sink = outputFile.openWrite();
 
-      for (int i = 0; i < chunkPaths.length; i++) {
-        final chunkFile = File(chunkPaths[i]);
-        if (await chunkFile.exists()) {
-          await sink.addStream(chunkFile.openRead());
+      try {
+        for (int i = 0; i < chunkPaths.length; i++) {
+          final chunkFile = File(chunkPaths[i]);
+          if (await chunkFile.exists()) {
+            await sink.addStream(chunkFile.openRead());
+          }
         }
+      } finally {
+        await sink.close();
       }
-
-      await sink.close();
       debugPrint(
         '✅ Parallel download complete: ${(totalSize / 1024 / 1024).toStringAsFixed(2)} MB',
       );

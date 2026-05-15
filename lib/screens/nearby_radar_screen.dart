@@ -140,6 +140,7 @@ class _NearbyRadarScreenState extends State<NearbyRadarScreen>
                     else
                       Expanded(
                         child: ListView.builder(
+                          padding: EdgeInsets.only(bottom: MediaQuery.of(context).padding.bottom + 16),
                           itemCount: completed.length,
                           itemBuilder: (context, index) {
                             final task = completed[index];
@@ -310,7 +311,12 @@ class _NearbyRadarScreenState extends State<NearbyRadarScreen>
             const SizedBox(height: 8),
             Expanded(
               child: ListView.builder(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                padding: EdgeInsets.only(
+                  left: 12,
+                  right: 12,
+                  top: 4,
+                  bottom: MediaQuery.of(context).padding.bottom + 16,
+                ),
                 itemCount: _nearbyService.peers.length,
                 itemBuilder: (context, index) {
                   final peer = _nearbyService.peers[index];

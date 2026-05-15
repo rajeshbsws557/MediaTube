@@ -195,64 +195,102 @@ class _HomeScreenState extends State<HomeScreen> {
     await prefs.setStringList('custom_quick_sites', sitesJson);
   }
 
+  /// Resolves a user-typed site input into a proper URL.
+  /// - Bare names like "netflix" become "https://netflix.com"
+  /// - Names with dots like "bbc.co.uk" become "https://bbc.co.uk"
+  /// - Full URLs are kept as-is
+  static String _resolveQuickSiteUrl(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return '';
+
+    // Already has a scheme
+    if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+      return trimmed;
+    }
+
+    String host = trimmed;
+    // If the input has no dot at all (e.g. "netflix"), append .com
+    if (!host.contains('.')) {
+      host = '$host.com';
+    }
+
+    return 'https://$host';
+  }
+
   void _showAddSiteDialog() {
     final nameController = TextEditingController();
     final urlController = TextEditingController();
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Add Quick Site'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            TextField(
-              controller: nameController,
-              decoration: const InputDecoration(
-                labelText: 'Name',
-                hintText: 'My Site',
-              ),
-            ),
-            TextField(
-              controller: urlController,
-              decoration: const InputDecoration(
-                labelText: 'URL',
-                hintText: 'https://example.com',
-              ),
-              keyboardType: TextInputType.url,
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () {
-              if (nameController.text.isNotEmpty &&
-                  urlController.text.isNotEmpty) {
-                String fullUrl = urlController.text;
-                if (!fullUrl.startsWith('http')) fullUrl = 'https://$fullUrl';
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            // Live-preview the resolved URL
+            final resolvedUrl = _resolveQuickSiteUrl(urlController.text);
+            final hasValidInput = nameController.text.trim().isNotEmpty &&
+                urlController.text.trim().isNotEmpty;
 
-                setState(() {
-                  _customSites.add(
-                    QuickAccessSite(
-                      name: nameController.text,
-                      url: fullUrl,
-                      icon: Icons.language,
-                      color: Colors.blueAccent,
+            return AlertDialog(
+              title: const Text('Add Quick Site'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: nameController,
+                    decoration: const InputDecoration(
+                      labelText: 'Name',
+                      hintText: 'My Site',
                     ),
-                  );
-                });
-                _saveCustomSites();
-                Navigator.pop(context);
-              }
-            },
-            child: const Text('Add'),
-          ),
-        ],
-      ),
+                    onChanged: (_) => setDialogState(() {}),
+                  ),
+                  TextField(
+                    controller: urlController,
+                    decoration: InputDecoration(
+                      labelText: 'URL or site name',
+                      hintText: 'netflix or example.com',
+                      helperText: urlController.text.trim().isNotEmpty
+                          ? 'Will open: $resolvedUrl'
+                          : null,
+                      helperMaxLines: 2,
+                    ),
+                    keyboardType: TextInputType.url,
+                    onChanged: (_) => setDialogState(() {}),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('Cancel'),
+                ),
+                TextButton(
+                  onPressed: hasValidInput
+                      ? () {
+                          final fullUrl =
+                              _resolveQuickSiteUrl(urlController.text);
+
+                          setState(() {
+                            _customSites.add(
+                              QuickAccessSite(
+                                name: nameController.text.trim(),
+                                url: fullUrl,
+                                icon: Icons.language,
+                                color: Colors.blueAccent,
+                              ),
+                            );
+                          });
+                          _saveCustomSites();
+                          Navigator.pop(dialogContext);
+                        }
+                      : null,
+                  child: const Text('Add'),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
   }
 
@@ -674,18 +712,16 @@ class _SearchBarWidgetState extends State<_SearchBarWidget> {
     super.dispose();
   }
 
-  String? _processUrl(String text) {
-    return UrlInputSanitizer.sanitizeToNavigableUrl(text);
+  String _processUrl(String text) {
+    // sanitizeToNavigableUrl handles both URLs and search queries.
+    // For bare text like "funny cat videos" it returns a search engine URL.
+    // It should only return null for empty input.
+    return UrlInputSanitizer.sanitizeToNavigableUrl(text) ??
+        'https://duckduckgo.com/?q=${Uri.encodeComponent(text.trim())}';
   }
 
   void _submitInput(String input) {
     final normalized = _processUrl(input);
-    if (normalized == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Only valid http/https URLs are allowed.')),
-      );
-      return;
-    }
     widget.onNavigate(normalized);
   }
 
@@ -708,7 +744,7 @@ class _SearchBarWidgetState extends State<_SearchBarWidget> {
       child: TextField(
         controller: _controller,
         decoration: InputDecoration(
-          hintText: 'Search or enter URL...',
+          hintText: 'Search the web or paste a URL...',
           hintStyle: TextStyle(
             color: widget.isDark ? Colors.white54 : Colors.grey[500],
           ),

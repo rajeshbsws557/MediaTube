@@ -52,6 +52,12 @@ class SecurityService {
         if (signature.toLowerCase() !=
             AppConfig.expectedSignatureHash.toLowerCase()) {
           debugPrint('❌ Security Alert: Signature mismatch!');
+          if (!kReleaseMode) {
+            // In debug/profile mode, signature will differ because of different
+            // signing keys. Log it but don't block the app.
+            debugPrint('⚠️ Skipping signature enforcement in debug mode.');
+            return true;
+          }
           _showCompromisedDialog(
             context,
             'Invalid Signature or Cloned APK',

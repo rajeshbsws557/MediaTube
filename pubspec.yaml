@@ -7,7 +7,7 @@
 name: media_tube
 description: "A media browser with video/audio detection and downloading capabilities"
 publish_to: 'none'
-version: 1.0.5+5
+version: 1.0.6+6
 
 environment:
   sdk: ^3.10.0

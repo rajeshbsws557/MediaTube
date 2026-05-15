@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../models/models.dart';
 import '../services/services.dart';
 import '../main.dart'; // Import to access scaffoldMessengerKey
@@ -41,7 +42,7 @@ class DownloadProvider extends ChangeNotifier {
   final Map<String, DateTime> _lastTimeValues = {};
   final Map<String, int> _smoothedSpeedValues = {};
   final Map<String, DateTime> _lastNotificationTimes = {};
-  final Map<String, DateTime> _lastHistorySnapshotTimes = {};
+  final Map<String, double> _lastHistorySnapshotProgress = {};
 
   // Limit concurrent downloads to prevent bandwidth/thread saturation on mobile.
   int _maxConcurrentDownloads = SettingsService.defaultMaxConcurrentDownloads;
@@ -292,6 +293,23 @@ class DownloadProvider extends ChangeNotifier {
 
   /// Start downloading a media file with concurrent download limiting
   Future<void> startDownload(DetectedMedia media) async {
+    // 1. Verify Storage Permission
+    final storageStatus = await Permission.storage.status;
+    if (!storageStatus.isGranted) {
+      bool isFallbackReady = false;
+      try {
+         final downloadService = DownloadService();
+         await downloadService.ensureDownloadDirectory();
+         isFallbackReady = true;
+      } catch (e) {
+         isFallbackReady = false;
+      }
+      
+      if (!isFallbackReady) {
+        throw Exception('Storage permission denied. Please enable Storage in Settings.');
+      }
+    }
+
     try {
       final task = await _downloadService.createDownloadTask(media);
       final notificationId = _notificationId++;
@@ -544,7 +562,7 @@ class DownloadProvider extends ChangeNotifier {
     _lastTimeValues.remove(taskId);
     _smoothedSpeedValues.remove(taskId);
     _lastNotificationTimes.remove(taskId);
-    _lastHistorySnapshotTimes.remove(taskId);
+    _lastHistorySnapshotProgress.remove(taskId);
 
     if (disposeNotifier) {
       _progressNotifiers[taskId]?.dispose();
@@ -568,10 +586,13 @@ class DownloadProvider extends ChangeNotifier {
       if (updatedTask.status == DownloadStatus.downloading ||
           updatedTask.status == DownloadStatus.merging ||
           updatedTask.status == DownloadStatus.pending) {
-        final lastSnapshotAt = _lastHistorySnapshotTimes[updatedTask.id];
-        if (lastSnapshotAt == null ||
-            now.difference(lastSnapshotAt) >= const Duration(seconds: 5)) {
-          _lastHistorySnapshotTimes[updatedTask.id] = now;
+        final lastSnapshotProgress = _lastHistorySnapshotProgress[updatedTask.id];
+        
+        // Save state at every 5% boundary to prevent data loss on crash
+        if (lastSnapshotProgress == null || 
+            (updatedTask.progress - lastSnapshotProgress).abs() >= 0.05 ||
+            updatedTask.progress >= 1.0) {
+          _lastHistorySnapshotProgress[updatedTask.id] = updatedTask.progress;
           unawaited(_saveToHistory(updatedTask, refreshHistory: false));
         }
       }
@@ -911,7 +932,7 @@ class DownloadProvider extends ChangeNotifier {
     await _historyService.clearHistory();
     _historyDownloads.clear();
     _mediaMap.clear();
-    _lastHistorySnapshotTimes.clear();
+    _lastHistorySnapshotProgress.clear();
     _immediateNotify();
   }
 
@@ -956,7 +977,7 @@ class DownloadProvider extends ChangeNotifier {
     _lastTimeValues.clear();
     _smoothedSpeedValues.clear();
     _lastNotificationTimes.clear();
-    _lastHistorySnapshotTimes.clear();
+    _lastHistorySnapshotProgress.clear();
     for (final notifier in _progressNotifiers.values) {
       notifier.dispose();
     }

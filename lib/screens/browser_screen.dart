@@ -27,6 +27,7 @@ class BrowserScreen extends StatefulWidget {
 
 class _BrowserScreenState extends State<BrowserScreen>
     with WidgetsBindingObserver, TickerProviderStateMixin {
+  // ignore: unused_field
   static const String _youtubeHomeUrl = 'https://m.youtube.com';
   static const String _youtubeVisibilityBypassScript = r'''
     (() => {
@@ -1527,7 +1528,7 @@ class _BrowserScreenState extends State<BrowserScreen>
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Only valid http/https URLs are allowed.'),
+          content: Text('Could not open that link. Try a full URL like https://example.com'),
         ),
       );
       return;
@@ -1560,9 +1561,6 @@ class _BrowserScreenState extends State<BrowserScreen>
         }
 
         if (_showHomePage) {
-          // If we are on the home page, let the system handle back if needed
-          // but typically we don't want to exit the app immediately.
-          // For now, if we're on the home page, we allow pop.
           if (!mounted) return;
           final navigator = Navigator.of(context);
           if (navigator.canPop()) {
@@ -1584,96 +1582,98 @@ class _BrowserScreenState extends State<BrowserScreen>
         body: LayoutBuilder(
           builder: (context, constraints) {
             final viewport = Size(constraints.maxWidth, constraints.maxHeight);
-          final safePadding = MediaQuery.viewPaddingOf(context);
-          final omniFabAbsolute = _normalizedToAbsolute(
-            _omniFabNormalized,
-            viewport,
-            safePadding,
-            _omniFabSize,
-          );
+            final safePadding = MediaQuery.viewPaddingOf(context);
 
-          return Stack(
-            children: [
-              Positioned.fill(
-                child: SafeArea(
-                  child: Offstage(
-                    offstage: _showHomePage,
-                    child: _buildWebView(),
-                  ),
-                ),
-              ),
-              if (_showHomePage)
-                Positioned.fill(
-                  child: SafeArea(
-                    child: HomeScreen(
-                      onNavigate: _loadUrl,
+          return Consumer<BrowserProvider>(
+            builder: (context, browserProvider, _) {
+              return Stack(
+                children: [
+                  // WebView layer
+                  Positioned.fill(
+                    child: SafeArea(
+                      bottom: false,
+                      child: Column(
+                        children: [
+                          // Top URL indicator bar (only when browsing)
+                          if (!_showHomePage)
+                            _buildTopUrlIndicator(
+                              context,
+                              currentUrl: _urlController.text,
+                            ),
+                          // WebView
+                          Expanded(
+                            child: Offstage(
+                              offstage: _showHomePage,
+                              child: _buildWebView(),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
-                ),
-              if (_isOmniMenuExpanded || _omniMenuController.value > 0)
-                Positioned.fill(
-                  child: IgnorePointer(
-                    ignoring: !_isOmniMenuExpanded,
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onTap: _collapseOmniMenu,
-                      child: const SizedBox.expand(),
+                  // Home screen overlay
+                  if (_showHomePage)
+                    Positioned.fill(
+                      child: SafeArea(
+                        child: HomeScreen(
+                          onNavigate: _loadUrl,
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-              ..._buildOmniMenuActions(
-                anchor: omniFabAbsolute,
-                viewport: viewport,
-                safePadding: safePadding,
-              ),
-              _buildDraggableOmniFab(
-                position: omniFabAbsolute,
-                viewport: viewport,
-                safePadding: safePadding,
-              ),
-              Selector<
-                BrowserProvider,
-                ({
-                  bool hasDetectedMedia,
-                  bool isYouTubePage,
-                  bool hasFetchError,
-                  bool isFetchingMedia,
-                })
-              >(
-                selector: (_, provider) => (
-                  hasDetectedMedia: provider.hasDetectedMedia,
-                  isYouTubePage: provider.isYouTubePage,
-                  hasFetchError: provider.hasFetchError,
-                  isFetchingMedia: provider.isFetchingMedia,
-                ),
-                builder: (context, streamState, _) {
-                  _syncStreamPulseState(streamState.isFetchingMedia);
-
-                  final streamFabAbsolute = _normalizedToAbsolute(
-                    _streamFabNormalized,
-                    viewport,
-                    safePadding,
-                    _streamFabSize,
-                  );
-
-                  return _buildDraggableStreamFab(
-                    position: streamFabAbsolute,
+                  // Bottom chrome navigation bar
+                  if (!_showHomePage)
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 0,
+                      child: _buildBottomChrome(
+                        canGoBack: browserProvider.canGoBack,
+                        canGoForward: browserProvider.canGoForward,
+                        isLoading: browserProvider.isLoading,
+                      ),
+                    ),
+                  // Omni menu scrim
+                  if (_isOmniMenuExpanded || _omniMenuController.value > 0)
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        ignoring: !_isOmniMenuExpanded,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: _collapseOmniMenu,
+                          child: const SizedBox.expand(),
+                        ),
+                      ),
+                    ),
+                  // Omni menu action items (expand from the pill dock position)
+                  ..._buildOmniMenuActions(
+                    anchor: Offset(
+                      viewport.width / 2 - _omniFabSize / 2,
+                      viewport.height - safePadding.bottom - 80 - _omniFabSize,
+                    ),
                     viewport: viewport,
                     safePadding: safePadding,
-                    hasDetectedMedia: streamState.hasDetectedMedia,
-                    isYouTubePage: streamState.isYouTubePage,
-                    hasFetchError: streamState.hasFetchError,
-                    isFetchingMedia: streamState.isFetchingMedia,
-                  );
-                },
-              ),
-            ],
+                  ),
+                  // Unified pill dock at bottom center
+                  if (!_showHomePage)
+                    _buildUnifiedPillDock(
+                      viewport: viewport,
+                      safePadding: safePadding,
+                      hasDetectedMedia: browserProvider.hasDetectedMedia,
+                      isYouTubePage: browserProvider.isYouTubePage,
+                      hasFetchError: browserProvider.hasFetchError,
+                      isFetchingMedia: browserProvider.isFetchingMedia,
+                      mediaCount: browserProvider.detectedMedia.length,
+                    ),
+                ],
+              );
+            },
           );
         },
       ),
     ));
   }
 
+  // ignore: unused_element
   Widget _buildDraggableOmniFab({
     required Offset position,
     required Size viewport,
@@ -1749,7 +1749,7 @@ class _BrowserScreenState extends State<BrowserScreen>
       _OmniMenuAction(
         icon: Icons.home_rounded,
         label: 'Home',
-        onTap: () => _loadUrl(_youtubeHomeUrl),
+        onTap: _goHome,
       ),
     ];
 
@@ -2020,6 +2020,7 @@ class _BrowserScreenState extends State<BrowserScreen>
     _streamPulseController.value = 0;
   }
 
+  // ignore: unused_element
   Widget _buildDraggableStreamFab({
     required Offset position,
     required Size viewport,
@@ -2153,6 +2154,315 @@ class _BrowserScreenState extends State<BrowserScreen>
     );
   }
 
+  // Top URL indicator — slim bar showing current domain, tap to edit URL
+  Widget _buildTopUrlIndicator(BuildContext context, {required String currentUrl}) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    // Extract domain for display
+    String displayText = currentUrl;
+    try {
+      final uri = Uri.tryParse(currentUrl);
+      if (uri != null && uri.host.isNotEmpty) {
+        final isSecure = uri.scheme == 'https';
+        displayText = '${isSecure ? '🔒 ' : ''}${uri.host}';
+      }
+    } catch (_) {}
+
+    if (!_isUrlBarVisible) {
+      // Collapsed: show domain pill
+      return GestureDetector(
+        onTap: _toggleUrlBarVisibility,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: BoxDecoration(
+            color: isDark
+                ? const Color(0xFF1A1A24)
+                : Colors.white,
+            border: Border(
+              bottom: BorderSide(
+                color: isDark
+                    ? Colors.white.withAlpha(15)
+                    : Colors.black.withAlpha(12),
+              ),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                currentUrl.startsWith('https')
+                    ? Icons.lock_rounded
+                    : Icons.language_rounded,
+                size: 14,
+                color: currentUrl.startsWith('https')
+                    ? Colors.green.shade400
+                    : Colors.orange,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  displayText,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: isDark ? Colors.white60 : Colors.black54,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              Icon(
+                Icons.edit_rounded,
+                size: 14,
+                color: isDark ? Colors.white30 : Colors.black26,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Expanded: full URL editing bar
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF1A1A24) : Colors.white,
+        border: Border(
+          bottom: BorderSide(
+            color: isDark ? Colors.white.withAlpha(15) : Colors.black.withAlpha(12),
+          ),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Container(
+              decoration: BoxDecoration(
+                color: isDark
+                    ? Colors.white.withAlpha(15)
+                    : Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(22),
+              ),
+              child: Row(
+                children: [
+                  const SizedBox(width: 12),
+                  Icon(
+                    Icons.search_rounded,
+                    size: 18,
+                    color: isDark ? Colors.white54 : Colors.grey.shade600,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: _urlController,
+                      focusNode: _urlFocusNode,
+                      decoration: const InputDecoration(
+                        hintText: 'Search or enter URL',
+                        border: InputBorder.none,
+                        isDense: true,
+                        contentPadding: EdgeInsets.symmetric(vertical: 10),
+                      ),
+                      keyboardType: TextInputType.url,
+                      textInputAction: TextInputAction.go,
+                      onSubmitted: (text) {
+                        _loadUrl(text);
+                        _toggleUrlBarVisibility();
+                      },
+                    ),
+                  ),
+                  if (_urlController.text.isNotEmpty)
+                    IconButton(
+                      icon: const Icon(Icons.clear, size: 18),
+                      onPressed: () {
+                        _urlController.clear();
+                        _urlFocusNode.requestFocus();
+                      },
+                      constraints: const BoxConstraints(
+                        minWidth: 32,
+                        minHeight: 32,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          IconButton(
+            icon: const Icon(Icons.close_rounded, size: 20),
+            onPressed: _toggleUrlBarVisibility,
+            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Unified pill-shaped dock at the bottom of the screen.
+  /// Combines the omni-menu button and download/media button into one.
+  Widget _buildUnifiedPillDock({
+    required Size viewport,
+    required EdgeInsets safePadding,
+    required bool hasDetectedMedia,
+    required bool isYouTubePage,
+    required bool hasFetchError,
+    required bool isFetchingMedia,
+    required int mediaCount,
+  }) {
+    _syncStreamPulseState(isFetchingMedia);
+
+    final showMediaAction = hasDetectedMedia || isFetchingMedia || isYouTubePage || hasFetchError;
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+
+    // Determine download button color
+    final downloadColor = isFetchingMedia
+        ? Colors.orange
+        : hasDetectedMedia
+            ? Colors.green.shade600
+            : hasFetchError
+                ? Colors.orange.shade700
+                : const Color(0xFFE50914);
+
+    return Positioned(
+      bottom: safePadding.bottom + 68, // above bottom chrome
+      left: 0,
+      right: 0,
+      child: Center(
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 280),
+          curve: Curves.easeOutCubic,
+          height: 52,
+          padding: const EdgeInsets.symmetric(horizontal: 4),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(28),
+            gradient: const LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [Color(0xFF1C1C28), Color(0xFF14141C)],
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withAlpha(100),
+                blurRadius: 16,
+                offset: const Offset(0, 6),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Menu button
+              GestureDetector(
+                onTap: _toggleOmniMenu,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  width: 46,
+                  height: 46,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: _isOmniMenuExpanded
+                        ? null
+                        : const LinearGradient(
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                            colors: [Color(0xFFFF2D2D), Color(0xFFE50914)],
+                          ),
+                    color: _isOmniMenuExpanded
+                        ? (isDark ? Colors.white.withAlpha(25) : Colors.grey.shade300)
+                        : null,
+                  ),
+                  child: Icon(
+                    _isOmniMenuExpanded ? Icons.close_rounded : Icons.menu_rounded,
+                    color: _isOmniMenuExpanded
+                        ? (isDark ? Colors.white70 : Colors.black54)
+                        : Colors.white,
+                    size: 24,
+                  ),
+                ),
+              ),
+              // Download / media button — only visible when relevant
+              if (showMediaAction) ...[  
+                const SizedBox(width: 4),
+                GestureDetector(
+                  onTap: () {
+                    if (isFetchingMedia) return;
+                    final provider = context.read<BrowserProvider>();
+                    if (!hasDetectedMedia) {
+                      unawaited(
+                        provider.refreshCurrentPlatformMedia(
+                          forceRefresh: true,
+                          runHeadlessExtractor: true,
+                        ),
+                      );
+                    }
+                    _showMediaSheet(context, provider);
+                  },
+                  child: AnimatedBuilder(
+                    animation: _streamPulseController,
+                    builder: (context, _) {
+                      final pulse = _isStreamPulseActive
+                          ? _streamPulseController.value
+                          : 0.0;
+                      final scale = 1 + (0.08 * pulse);
+                      final btnColor = Color.lerp(
+                            downloadColor, Colors.white, 0.12 * pulse) ??
+                          downloadColor;
+
+                      return Transform.scale(
+                        scale: scale,
+                        child: Container(
+                          height: 46,
+                          padding: const EdgeInsets.symmetric(horizontal: 14),
+                          decoration: BoxDecoration(
+                            color: btnColor,
+                            borderRadius: BorderRadius.circular(24),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (isFetchingMedia)
+                                const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              else
+                                Icon(
+                                  hasFetchError
+                                      ? Icons.refresh_rounded
+                                      : Icons.download_rounded,
+                                  color: Colors.white,
+                                  size: 20,
+                                ),
+                              if (hasDetectedMedia && mediaCount > 0) ...[
+                                const SizedBox(width: 6),
+                                Text(
+                                  '$mediaCount',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   // ignore: unused_element
   Widget _buildTopChrome({
     required String currentUrl,
@@ -2279,7 +2589,6 @@ class _BrowserScreenState extends State<BrowserScreen>
     );
   }
 
-  // ignore: unused_element
   Widget _buildBottomChrome({
     required bool canGoBack,
     required bool canGoForward,

@@ -2,17 +2,57 @@ import 'package:flutter/foundation.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
+import 'dart:collection';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 import '../models/detected_media.dart';
+
+/// LRU Cache implementation to prevent memory leaks during long browsing sessions
+class _LruCache<K, V> {
+  final int maxSize;
+  final LinkedHashMap<K, V> _map = LinkedHashMap<K, V>();
+
+  _LruCache(this.maxSize);
+
+  V? operator [](K key) => get(key);
+
+  void operator []=(K key, V value) => put(key, value);
+
+  V? get(K key) {
+    if (_map.containsKey(key)) {
+      final value = _map.remove(key) as V;
+      _map[key] = value; // promote to most recently used
+      return value;
+    }
+    return null;
+  }
+
+  void put(K key, V value) {
+    if (_map.containsKey(key)) {
+      _map.remove(key);
+    }
+    _map[key] = value;
+    
+    // Evict oldest if we exceed capacity
+    if (_map.length > maxSize) {
+      _map.remove(_map.keys.first);
+    }
+  }
+
+  void remove(K key) {
+    _map.remove(key);
+  }
+
+  void clear() => _map.clear();
+}
 
 /// Service to extract video/audio streams from YouTube using youtube_explode_dart
 /// Optimized with caching and parallel operations
 class YouTubeService {
   YoutubeExplode? _yt;
 
-  // Cache for manifests and video info to avoid repeated fetches
-  final Map<String, _CachedData<StreamManifest>> _manifestCache = {};
-  final Map<String, _CachedData<Video>> _videoCache = {};
+  // Cache for manifests and video info to avoid repeated fetches (Max 50 items each)
+  final _LruCache<String, _CachedData<StreamManifest>> _manifestCache = _LruCache(50);
+  final _LruCache<String, _CachedData<Video>> _videoCache = _LruCache(50);
   static const Duration _cacheDuration = Duration(minutes: 5);
 
   YoutubeExplode get yt {
@@ -450,15 +490,15 @@ class YouTubeService {
       }
 
       await output.flush();
-      await output.close();
 
       debugPrint(
         'Downloaded $chunkCount chunks, ${(downloadedBytes / 1024 / 1024).toStringAsFixed(1)} MB',
       );
     } catch (e) {
-      await output.close();
       debugPrint('Stream error: $e');
       rethrow;
+    } finally {
+      await output.close();
     }
   }
 
@@ -552,15 +592,17 @@ class YouTubeService {
       final totalBytes = streamInfo.size.totalBytes;
       var receivedBytes = 0;
 
-      await for (final chunk in stream) {
-        fileStream.add(chunk);
-        receivedBytes += chunk.length;
-        if (totalBytes > 0) {
-          onProgress?.call(receivedBytes / totalBytes);
+      try {
+        await for (final chunk in stream) {
+          fileStream.add(chunk);
+          receivedBytes += chunk.length;
+          if (totalBytes > 0) {
+            onProgress?.call(receivedBytes / totalBytes);
+          }
         }
+      } finally {
+        await fileStream.close();
       }
-
-      await fileStream.close();
     } catch (e) {
       debugPrint('Error downloading by video ID: $e');
       rethrow;

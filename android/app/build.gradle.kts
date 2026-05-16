@@ -69,6 +69,12 @@ android {
         }
     }
 
+    val releaseSigningReady =
+        (keystoreProperties["keyAlias"] as String?) != null &&
+            (keystoreProperties["keyPassword"] as String?) != null &&
+            ((keystoreProperties["storeFile"] as String?) ?: System.getenv("STORE_FILE")) != null &&
+            (keystoreProperties["storePassword"] as String?) != null
+
 
 
     buildTypes {
@@ -80,7 +86,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            signingConfig = null // Set to null for unsigned release build
+            signingConfig = if (releaseSigningReady) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
     
@@ -98,38 +108,6 @@ android {
         }
     }
     
-    // Auto-copy APKs to Flutter's expected output directory for all variants.
-    // This keeps `flutter build apk` artifact discovery working when ABI splits are enabled.
-    applicationVariants.all {
-        val variant = this
-        val variantName = variant.name
-        val flutterOutput = rootProject.file("../build/app/outputs/flutter-apk")
-        val variantApkDir = rootProject.file("app/build/outputs/apk/$variantName")
-
-        variant.assembleProvider.get().doLast {
-            if (!flutterOutput.exists()) {
-                flutterOutput.mkdirs()
-            }
-
-            // Copy all split APKs for this variant.
-            copy {
-                from(variantApkDir)
-                include("*.apk")
-                into(flutterOutput)
-            }
-
-            // Also provide the canonical app-<variant>.apk expected by Flutter tooling.
-            val universalApk = file("$variantApkDir/app-universal-$variantName.apk")
-            if (universalApk.exists()) {
-                copy {
-                    from(universalApk)
-                    into(flutterOutput)
-                    rename { "app-$variantName.apk" }
-                }
-                println("✅ Copied app-$variantName.apk to ${flutterOutput.absolutePath}")
-            }
-        }
-    }
 }
 
 // Global configuration for Kotlin tasks - correct place for compilerOptions
@@ -151,6 +129,16 @@ dependencies {
     implementation("androidx.media:media:1.7.0")
     implementation("com.google.android.gms:play-services-cast-framework:22.1.0")
     implementation("com.google.android.gms:play-services-nearby:19.3.0")
+}
+
+tasks.register<Copy>("copyFlutterReleaseApks") {
+    from(layout.buildDirectory.dir("outputs/apk/release"))
+    include("*.apk")
+    into(rootProject.layout.buildDirectory.dir("app/outputs/flutter-apk"))
+}
+
+tasks.matching { it.name == "assembleRelease" }.configureEach {
+    finalizedBy("copyFlutterReleaseApks")
 }
 
 flutter {
